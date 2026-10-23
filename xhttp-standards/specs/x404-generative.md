@@ -188,20 +188,115 @@ X-Semantic-Hash: semhash:a8f4b2c1d9e0f3a76b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7
 }
 ```
 
+### 3.3. Example Request: Synthesis Confirmation & Initiation (Wire Example)
+
+When the client agent accepts the terms of the generative work order, it initiates synthesis via an authenticated HTTP POST:
+
+```http
+POST /models/embeddings/bge-m3-quantized.onnx HTTP/1.1
+Host: edge.mindrock.capital
+Authorization: Multipass eyJwcm90byI6InhodHRwLTQwMS1tdWx0aXBhc3MiLCJjaGFsbGVuZ2VfaWQiOiJjaF83ZjhhOWIyYzNkNGU1ZjYwIiwibm9uY2VfZWNobyI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NTUiLCJjbGllbnRfZGlkIjoiZGlkOmtleTp6Nk1rbkRjYnpNQ2lGTExkeEtRYm9DcVZHUFlac0pid3AyN28zN2dZcUJFcUo0TkUjYWd5QHdvbGZyYW0iLCJnb2Ruc19sb2NhdG9yIjoiX21hbmRhdGUuYWd5LmhhY2t0LmNvbSIsIm1hbmRhdGVfaWQiOiJtYW5kYXRlX2M4NDdkMTBlOWYxYSIsInRpbWVzdGFtcCI6IjIwMjYtMTAtMjNUMTE6NDY6MTJaIiwic2lnbmF0dXJlIjoiZjFiMDk4OGI0MzEyMjM3ZGY1Y2Y2MDQ5ZWNmZDE1ZjkyOTRkOGUwNWRlODIzZWJlYTZjNGY5M2I4ZGVlYTA3MDk2NmExNTcyOGJmOWQ2MDZjNGYwODlhMDg3NmI5ZDc3MWY5ZjExZTE5Yzc2MmUzNGY3NGU2YWVmZmY4ODUwMDYifQ
+X-Action: Execute-Synthesis
+X-Semantic-Hash: semhash:a8f4b2c1d9e0f3a76b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a
+Content-Type: application/json; charset=utf-8
+Content-Length: 138
+
+{
+  "agreed_budget": 5000,
+  "oracle_ack": true,
+  "client_instance_id": "agy-wolfram-01",
+  "callback_url": "https://agy.mindrock.capital/hooks/synthesis"
+}
+```
+
 ---
 
-## 4. Semantic Hashing Algorithm (`SemHash`)
+## 4. Semantic Normalization & Deduplication Algorithm (`SemHash`)
 
-To prevent duplicate generative synthesis cycles, edge gateways compute a deterministic `SemHash`:
+To prevent duplicate generative synthesis cycles, edge gateways compute a deterministic `SemHash`. Rather than relying on naive text hashing, `SemHash` applies a strict normalization pipeline that maps semantically equivalent requests to the identical hash digest.
 
-$$\text{SemHash} = \text{SHA256}(\text{JCS}(\text{NormalizedIntent}))$$
+### 4.1. Step-by-Step Normalization Pipeline
 
-Where $\text{NormalizedIntent}$ contains:
-1. Canonical URI route template (omitting volatile query parameters).
-2. The normalized JSON body or synthesis context parameters sorted lexicographically (RFC 8785).
-3. The target architecture or output schema requirements.
+The normalization process comprises five sequential phases:
 
-When an edge node receives a request with a recognized `SemHash` that is currently in-flight by another agent, it automatically binds the second request to the active synthesis task, preventing double-billing and GPU exhaustion.
+```
+[Incoming Request]
+       │
+       ▼ Phase 1: URI Path Canonicalization (RFC 3986 path normalization, lowercased segments)
+       │
+       ▼ Phase 2: Volatile Query Stripping (Remove timestamps, trace IDs, auth signatures)
+       │
+       ▼ Phase 3: Unicode & Whitespace Normalization (NFC normalization, space collapsing)
+       │
+       ▼ Phase 4: Media-Type & Parameter Canonicalization (Sort semantic params, canonical media type)
+       │
+       ▼ Phase 5: Domain Separation & JCS Hashing (xhttp-semhash-v1: prefix + RFC 8785 JCS)
+       │
+[Deterministic SemHash]
+```
+
+1. **Phase 1: URI Path Canonicalization**:
+   - Strip scheme (`http://`, `https://`) and authority/host.
+   - Resolve relative path segments (`.` and `..`) per RFC 3986 section 5.2.4.
+   - Collapse consecutive forward slashes into a single slash `/`.
+   - Strip trailing slashes unless path is root `/`.
+   - Decode unreserved percent-encoded octets; lowercase all percent-encoded hex sequences.
+
+2. **Phase 2: Query Parameter Filtering (Volatile vs. Semantic)**:
+   - Query parameters that represent ephemeral runtime state, tracing, or client identity MUST be completely stripped from the hash calculation.
+   - **Volatile Parameters (Always Excluded)**:
+     `timestamp`, `t`, `_`, `nonce`, `request_id`, `trace_id`, `span_id`, `client_id`, `session_id`, `sig`, `signature`, `callback`, `utm_*`, `cache_buster`.
+   - **Semantic Parameters (Retained)**:
+     Parameters dictating resource attributes (e.g. `target_arch`, `quantization`, `precision`, `dialect`).
+   - Retained parameters are sorted lexicographically by parameter name in ascending ASCII order. Both names and values are percent-encoded in lowercase.
+
+3. **Phase 3: Unicode & Text Normalization**:
+   - All string literals in prompt templates and parameters MUST be normalized to **Unicode Normalization Form C (NFC)**.
+   - Whitespace in non-code prompts is normalized: leading and trailing spaces are trimmed, and runs of whitespace (spaces, tabs, newlines) are collapsed to a single space character (`0x20`).
+
+4. **Phase 4: Media-Type Normalization**:
+   - Target format and MIME type strings are lowercased and stripped of optional parameter spacing (e.g. `application/octet-stream` or `application/json; charset=utf-8`).
+
+5. **Phase 5: Canonical Intent Object Construction**:
+   The normalized components are assembled into a canonical dictionary:
+   ```json
+   {
+     "canonical_path": "/models/embeddings/bge-m3-quantized.onnx",
+     "format": "application/octet-stream",
+     "parameters": {
+       "quantization_scheme": "symmetric-int8",
+       "source_model": "BAAI/bge-m3",
+       "target_runtime": "onnxruntime-arm64"
+     },
+     "prompt_template": "onnx-quantize-v2:int8",
+     "schema_version": "v1"
+   }
+   ```
+
+### 4.2. Hash Derivation Formula with Domain Separation
+
+To protect against cross-protocol collision attacks, the normalized object is prefixed with a static domain separator string before SHA-256 calculation:
+
+$$\text{SemHash} = \text{"semhash:"} + \text{HEX}(\text{SHA256}(\text{"xhttp-semhash-v1:"} \parallel \text{JCS}(\text{CanonicalIntentObject})))$$
+
+Where:
+* $\text{"xhttp-semhash-v1:"}$ is the ASCII domain separator.
+* $\text{JCS}(\cdot)$ is the RFC 8785 JSON Canonicalization Scheme serializer.
+* $\text{SHA256}(\cdot)$ computes the 32-byte cryptographic digest.
+* $\text{HEX}(\cdot)$ encodes the digest as 64 lowercase hexadecimal characters.
+
+### 4.3. Equivalence Recognition & Edge Coalescing
+
+Consider two distinct client requests dispatched by separate agents:
+* **Client A**:
+  `GET /models/embeddings/bge-m3-quantized.onnx?trace_id=987654321&arch=arm64&nonce=a1b2c3`
+* **Client B**:
+  `GET /models/embeddings/bge-m3-quantized.onnx?arch=arm64&session_id=sess_fedcba&t=1729684000`
+
+Because `trace_id`, `nonce`, `session_id`, and `t` are classified as volatile parameters, both requests produce the exact same `CanonicalIntentObject` and yield the identical `SemHash`:
+`semhash:a8f4b2c1d9e0f3a76b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a`
+
+When Client B's request arrives while Client A's synthesis is actively processing in the GPU slot, the edge gateway coalesces Client B into the existing job promise, eliminating redundant inference and double-billing.
 
 ---
 

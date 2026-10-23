@@ -51,6 +51,7 @@ Modern high-performance agent nodes execute with strict concurrency guarantees (
   * `DELEGATE`: Peer-to-peer offloading to an alternate federated edge node.
   * `OUR_LADY`: Circuit-breaker fallback to lower-fidelity cached models.
   * `FSCK_OFF` (*File System Check Off*): Deterministic node self-quarantine and queue purge when local state integrity fails.
+* **Structured Action Negotiation & Normative Fallback:** Formally defined wire protocol for client action selection (`ActionSelectionEnvelope`) bound to queue correlation IDs, accompanied by normative HTTP 429/503 transport fallback profiles for legacy network intermediaries.
 
 ---
 
@@ -72,5 +73,5 @@ To prevent speculative probing and protocol mismatch, participating edge nodes p
 
 The specifications are hosted publicly in the `agent-mandates` repository under the permissive MIT License:
 * **Repository:** [`https://github.com/pashamango/agent-mandates`](https://github.com/pashamango/agent-mandates)
-* **Specifications Folder:** [`xhttp-standards/specs/`](file:///Users/pavelcherkashin/ChitAkasha-Wolfram/worktrees/MIN-148-XHTTP-SPECS-0001/xhttp-standards/specs/)
+* **Specifications Folder:** [`xhttp-standards/specs/`](specs/)
 * **RFC Feedback:** We welcome pull requests, security audits, and issue debates on GitHub and GitLab.

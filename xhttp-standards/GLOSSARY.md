@@ -15,16 +15,19 @@
 * **goDNS / Mandate TXT Record**: A decentralized trust anchor leveraging DNS `TXT` records under the naming convention `_mandate.<agent-identifier>.<root-domain>`. Contains the public key, authorization scope, expiration timestamp, and the Principal's Ed25519 signature.
 * **Multipass**: A cryptographically verifiable authentication token containing the agent's DID, challenge nonce echo, timestamp, and Ed25519 signature, transmitted in the `Authorization: Multipass <token>` HTTP header.
 * **Canonical JSON Digest**: The SHA-256 hash computed over an RFC 8785 (JSON Canonicalization Scheme - JCS) normalized representation of a payload, ensuring deterministic signatures across disparate language runtimes.
+* **Principal Root Anchor**: The apex domain DNS TXT record (`_mandate-root.<root-domain>`) or pinned keystore holding the Principal authority's master Ed25519 public key, establishing the root of trust for all delegated agent mandates.
 
 ### 1.2. Generative Edge & Synthesis
 * **Generative 404 (`x404`)**: An enhanced HTTP status code and response envelope indicating that while the target static artifact does not exist on disk or cache, the edge compute layer possesses the prompt, context, or generative pipeline to synthesize it on demand.
 * **Semantic Hash (`SemHash`)**: A deterministic 64-character hexadecimal digest derived from the normalized semantic intent, schema requirements, and prompt parameters of a request. Used to detect semantic duplicates and route identical synthesis requests to shared edge cache buckets.
 * **Synthesis Work Order**: A structured JSON envelope detailing the parameters of an edge generation task, including model family, maximum token budget, deadline, constraints, and verification criteria.
 * **Verification Oracle**: An automated validation harness (such as a unit test suite, schema validator, or cryptographic checker) specified within an `x404` envelope to independently certify the correctness of synthesized output prior to client delivery.
+* **Semantic Normalization Pipeline**: The sequential 5-phase normalization process (path canonicalization, volatile parameter exclusion, Unicode NFC normalization, media-type normalization, and domain-separated JCS serialization) ensuring that semantically identical requests yield matching SemHash digests.
 
 ### 1.3. Revocation & Provenance
 * **Cryptographic Revocation Certificate (`x410`)**: An immutable, signed JSON object attesting that a specific URI or content digest was deliberately and permanently expunged by its authorized owner.
 * **Tombstone**: A persistent record stored in edge caches or indexers that responds to subsequent requests for a revoked resource, carrying the revocation certificate and reason code.
+* **Active Fast-Path SLA**: The time window defined by `retain_tombstone_days` during which an edge node guarantees immediate tombstone response before delegating to the permanent audit archive.
 * **Revocation Reason Code**: A standardized enumerator indicating the cause of removal:
   * `COMPROMISED`: Key compromise or critical security defect.
   * `MANDATE_EXPIRED`: Authority window elapsed.
@@ -35,6 +38,8 @@
 
 ### 1.4. Backpressure & Concurrency Control
 * **Patience Protocol (`x420`)**: A real-time backpressure signaling standard used when an edge node or compute slot is executing at capacity (`WIP=1`) and cannot accept new jobs immediately.
+* **Queue Correlation ID (`queue_id`)**: A unique identifier linking an in-flight backpressured compute request to subsequent action selection negotiations.
+* **Action Selection Envelope (`xhttp-420-action`)**: The standardized client request payload submitted to `negotiation_endpoint` to choose a recovery branch (`WAIT`, `PAY`, `DELEGATE`, `OUR_LADY`, `FSCK_OFF`).
 * **ETA Window & Drift Tolerance**: The server's estimated completion time for current in-flight operations, accompanied by a maximum expected drift margin in milliseconds.
 * **Backpressure Action Codes**: Standardized recovery pathways offered in an `x420` envelope:
   * `WAIT`: Instructs the client to pause and retry after the specified ETA window.
@@ -44,6 +49,7 @@
   * `FSCK_OFF` (*File System Check Off*): Instructs the client to terminate requests immediately and trigger an automated clean-room reset or cache purge because the server node's state is corrupted or under catastrophic overload.
 
 ### 1.5. Interoperability & Transport
+* **Normative Fallback Profile**: The backward-compatible transport mechanism whereby an edge server emits standard HTTP 429 or 503 status with `X-xHTTP-Profile: patience-v0.1` and `Content-Type: application/xhttp+json` to navigate legacy HTTP intermediaries.
 * **`/.well-known/xhttp`**: The canonical metadata discovery endpoint defined under RFC 8615, allowing clients to query server capabilities, supported status codes, cryptographic suites, and queue telemetry.
 * **Protocol Phi (`Φ-0.1`)**: The underlying multi-agent task handoff and messaging protocol operating across Git coordinates, Linear comments, and xHTTP edge gateways.
 

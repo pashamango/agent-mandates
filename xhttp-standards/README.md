@@ -52,11 +52,11 @@ The xHTTP suite comprises four core specification modules and a global discovery
 
 | Specification | Status | RFC File | Core Mechanism |
 | :--- | :---: | :--- | :--- |
-| **`x401`** | `DRAFT` | [`specs/x401-multipass-auth.md`](file:///Users/pavelcherkashin/ChitAkasha-Wolfram/worktrees/MIN-148-XHTTP-SPECS-0001/xhttp-standards/specs/x401-multipass-auth.md) | Multipass Auth Challenge: Nonce-based challenge envelope, decentralized agent identity presentation (`did:key`), and proof-of-possession verification via DNS TXT records (`goDNS`). |
-| **`x404`** | `DRAFT` | [`specs/x404-generative.md`](file:///Users/pavelcherkashin/ChitAkasha-Wolfram/worktrees/MIN-148-XHTTP-SPECS-0001/xhttp-standards/specs/x404-generative.md) | Generative 404: Edge-first generative error envelope with Semantic Hash (`SemHash`) deduplication, synthesis constraints, token budgets, and verification oracles. |
-| **`x410`** | `DRAFT` | [`specs/x410-revocation.md`](file:///Users/pavelcherkashin/ChitAkasha-Wolfram/worktrees/MIN-148-XHTTP-SPECS-0001/xhttp-standards/specs/x410-revocation.md) | Revocation with Certificate: Immutable Ed25519-signed revocation tombstones, reason codes, content hashes, and non-repudiation verification. |
-| **`x420`** | `DRAFT` | [`specs/x420-patience.md`](file:///Users/pavelcherkashin/ChitAkasha-Wolfram/worktrees/MIN-148-XHTTP-SPECS-0001/xhttp-standards/specs/x420-patience.md) | Patience Protocol: Dynamic agent backpressure envelope providing queue position, ETA window, and recovery action branches (`WAIT`, `PAY`, `DELEGATE`, `OUR_LADY`, `FSCK_OFF`). |
-| **`/.well-known`** | `DRAFT` | [`WELL-KNOWN.md`](file:///Users/pavelcherkashin/ChitAkasha-Wolfram/worktrees/MIN-148-XHTTP-SPECS-0001/xhttp-standards/WELL-KNOWN.md) | Canonical Edge Discovery: `/.well-known/xhttp` capabilities profile, protocol negotiation, supported cryptography, and edge runtime endpoints. |
+| **`x401`** | `DRAFT` | [`specs/x401-multipass-auth.md`](specs/x401-multipass-auth.md) | Multipass Auth Challenge: Nonce-based challenge envelope, decentralized agent identity presentation (`did:key`), and proof-of-possession verification via DNS TXT records (`goDNS`). |
+| **`x404`** | `DRAFT` | [`specs/x404-generative.md`](specs/x404-generative.md) | Generative 404: Edge-first generative error envelope with Semantic Hash (`SemHash`) deduplication, synthesis constraints, token budgets, and verification oracles. |
+| **`x410`** | `DRAFT` | [`specs/x410-revocation.md`](specs/x410-revocation.md) | Revocation with Certificate: Immutable Ed25519-signed revocation tombstones, reason codes, content hashes, and non-repudiation verification. |
+| **`x420`** | `DRAFT` | [`specs/x420-patience.md`](specs/x420-patience.md) | Patience Protocol: Dynamic agent backpressure envelope providing queue position, ETA window, and recovery action branches (`WAIT`, `PAY`, `DELEGATE`, `OUR_LADY`, `FSCK_OFF`). |
+| **`/.well-known`** | `DRAFT` | [`WELL-KNOWN.md`](WELL-KNOWN.md) | Canonical Edge Discovery: `/.well-known/xhttp` capabilities profile, protocol negotiation, supported cryptography, and edge runtime endpoints. |
 
 ---
 
@@ -93,5 +93,5 @@ Implementations of xHTTP servers, proxies, and agent clients must satisfy four a
 
 * **Gate 1 (Envelopes & Flow):** Complete JSON schema definitions, valid example payloads, and deterministic ASCII message sequence charts.
 * **Gate 2 (Security & Interop):** Dedicated threat models, replay prevention, side-channel mitigations, and honest interoperability constraints.
-* **Gate 3 (Semantics & Versioning):** Adherence to the unified vocabulary in [`GLOSSARY.md`](file:///Users/pavelcherkashin/ChitAkasha-Wolfram/worktrees/MIN-148-XHTTP-SPECS-0001/xhttp-standards/GLOSSARY.md) and SemVer 2.0.0.
+* **Gate 3 (Semantics & Versioning):** Adherence to the unified vocabulary in [`GLOSSARY.md`](GLOSSARY.md) and SemVer 2.0.0.
 * **Gate 4 (Public Readiness):** Clear developer documentation, test suites with zero parsing failures, and open-source contribution guidelines.

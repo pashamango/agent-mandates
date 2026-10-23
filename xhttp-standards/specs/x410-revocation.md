@@ -102,7 +102,17 @@ Auditor / Client Agent                                   Edge Server / Origin
 }
 ```
 
-### 3.2. Example Response: 410 Revocation Certificate
+### 3.2. Example Request: Resource Fetch Attempt (Wire Example)
+
+```http
+GET /mandates/agent-v1-compromised.json HTTP/1.1
+Host: edge.mindrock.capital
+Accept: application/xhttp+json, application/json
+User-Agent: MindrockAgent/1.0 (agy@wolfram)
+
+```
+
+### 3.3. Example Response: 410 Revocation Certificate (Wire Example)
 
 ```http
 HTTP/1.1 410 Gone
@@ -134,7 +144,9 @@ Cache-Control: public, max-age=31536000, immutable
 
 ---
 
-## 4. Verification Algorithm for Client Agents
+## 4. Verification Algorithm & Lifecycle Retention Semantics
+
+### 4.1. Client Agent Verification Algorithm
 
 Upon receiving an HTTP 410 response with an `xhttp-410-revocation` body, the client agent executes the following verification procedure before purging local caches:
 
@@ -145,11 +157,20 @@ Upon receiving an HTTP 410 response with an `xhttp-410-revocation` body, the cli
    - Canonicalize the copy using RFC 8785 (JCS).
    - Compute $\text{Digest} = \text{SHA256}(\text{CanonicalJSON})$.
 4. **Signature Verification**: Verify the 64-byte Ed25519 `signature` using the issuer's public key against $\text{Digest}$.
-5. **Tombstone Commitment**:
-   - If valid, mark the resource URI as **Permanently Expunged** in the client's internal database.
-   - Store the signed certificate for audit compliance.
-   - If `successor_uri` is present, update pointers to query the successor on subsequent operations.
-   - If invalid, flag the response as an untrusted proxy anomaly and alert the security governor.
+5. **Permanent Tombstone Commitment**:
+   - If valid, record the resource URI as **Permanently Expunged** in the client's local persistent revocation database with infinite lifetime ($\text{TTL} = \infty$).
+   - The client MUST NOT query this URI again; subsequent internal operations must immediately return the cached tombstone or route to `successor_uri` if specified.
+   - If signature verification fails, treat the response as an untrusted proxy anomaly and alert the fleet security governor.
+
+### 4.2. Retention Semantics & Post-SLA Behavior
+
+To resolve the trade-off between permanent cryptographic revocation and finite edge storage:
+* **Perpetual Cryptographic Non-Repudiation**: The revocation certificate is mathematically immutable and permanent. It cannot expire or be rescinded.
+* **Active Fast-Path SLA (`retain_tombstone_days`)**: The `retain_tombstone_days` parameter governs how long edge CDN and gateway nodes must retain the full certificate in their active, high-speed RAM/SSD caches with `Cache-Control: public, max-age=31536000, immutable`.
+* **Post-Retention Edge Behavior**: If an edge gateway prunes its active tombstone cache after `retain_tombstone_days` has elapsed:
+  - The server **MUST NOT** return a silent, bare `404 Not Found` without tombstone context.
+  - The server **MUST** return an HTTP 410 with an archived tombstone reference, or an RFC 7807 problem detail (`Content-Type: application/problem+json`) containing `type: "https://xhttp.org/probs/revocation-archived"` and the `X-Revocation-Archive: <public_audit_log_url>` header.
+  - This guarantees that newly provisioned agents querying an ancient URI can follow the verifiable audit log link to retrieve the permanent signed proof.
 
 ---
 
@@ -163,6 +184,6 @@ Upon receiving an HTTP 410 response with an `xhttp-410-revocation` body, the cli
 
 ## 6. Interoperability Notes & Limitations
 
-* **Permanent Storage Overhead**: Storing tombstones indefinitely can induce storage bloat for systems with millions of ephemeral items. The `retain_tombstone_days` field allows operators to specify an SLA (e.g. 365 days), after which the server may purge the tombstone and return a generic 404.
+* **Edge Storage vs. Permanent Audit Archives**: By decoupling edge active caching (`retain_tombstone_days`) from the permanent append-only audit log (`public_audit_log_url`), edge nodes prevent disk exhaustion while preserving immutable compliance evidence.
 * **Search Engine Crawlers**: Search crawlers (e.g. Googlebot) respect standard HTTP 410 status codes to de-index URLs from web search indices. The presence of the JSON envelope does not impede standard crawler de-indexing behavior.
 * **Partial Revocations**: xHTTP-410 does not support temporary suspension; temporary downtime must be signaled via standard `503 Service Unavailable` or `xHTTP-420 Patience`.

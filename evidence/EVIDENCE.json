@@ -1,6 +1,6 @@
 {
   "ticket_id": "MIN-148",
-  "run_id": "run-36237216d591",
+  "run_id": "run-eeecaa41283e",
   "builder": "agy@wolfram",
   "target_repository": "https://github.com/pashamango/agent-mandates.git",
   "branch": "minutta/min-148-min-117-spec-xhttp-open-standard-drafts",
@@ -15,5 +15,15 @@
     "xhttp-standards/specs/x420-patience.md"
   ],
   "test_suite": "tests/test_xhttp_specs.py",
-  "test_status": "10/10 PASS"
+  "test_status": "11/11 PASS",
+  "rework_resolutions": {
+    "item_1_g1_request_examples": "RESOLVED: Syntactically complete, parsed HTTP Request and Response wire examples added to all 4 specs.",
+    "item_2_x420_negotiation_protocol": "RESOLVED: Formal ActionSelectionEnvelope schema, queue_id correlation, negotiation_endpoint, and verification mechanics for WAIT, PAY, DELEGATE, OUR_LADY, and FSCK_OFF.",
+    "item_3_x401_trust_chain": "RESOLVED: Principal root key discovery via apex _mandate-root TXT and well-known, deterministic canonical signing serialization (CanonicalTXT), tag sorting, escaping, multibase z.../hex encoding, and scope/expiry algorithm.",
+    "item_4_x404_semantic_dedup": "RESOLVED: 5-phase SemHash normalization pipeline, explicit volatile parameter exclusion, Unicode NFC normalization, media-type normalization, and domain separator xhttp-semhash-v1:.",
+    "item_5_g4_no_local_urls": "RESOLVED: All file:/// links replaced with relative repo links.",
+    "item_6_test_suite_conformance": "RESOLVED: Test suite verifies separate request/response HTTP wire blocks, validates all 7 Draft 2020-12 JSON schemas and validates all example payloads against schemas without external dependencies.",
+    "item_7_x410_retention_semantics": "RESOLVED: Clarified perpetual cryptographic revocation vs edge fast-path SLA window retain_tombstone_days, post-retention archive redirection to public_audit_log_url, and client infinite TTL tombstone caching.",
+    "item_8_x420_interop_fallback": "RESOLVED: Normative RFC 9110 status code clarification and formal HTTP 429/503 fallback profile with X-xHTTP-Profile header and application/xhttp+json content type."
+  }
 }

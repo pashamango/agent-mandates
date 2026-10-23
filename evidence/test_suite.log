@@ -1,25 +1,27 @@
-test_gate_g1_flow_diagrams_and_envelopes (test_xhttp_specs.TestXHTTPSpecifications.test_gate_g1_flow_diagrams_and_envelopes)
-Verify Gate G1: flow diagrams and envelope formats present in all specs. ... ok
+test_gate_g1_request_and_response_wire_examples (test_xhttp_specs.TestXHTTPSpecifications.test_gate_g1_request_and_response_wire_examples)
+Verify Gate G1: flow diagrams, separate parsed request & response wire examples in every spec. ... ok
 test_gate_g2_security_and_interop_sections (test_xhttp_specs.TestXHTTPSpecifications.test_gate_g2_security_and_interop_sections)
 Verify Gate G2: Security Considerations and Interop Notes in each spec. ... ok
 test_gate_g3_glossary_and_versioning (test_xhttp_specs.TestXHTTPSpecifications.test_gate_g3_glossary_and_versioning)
 Verify Gate G3: Unified glossary and SemVer v0.1 versioning policy. ... ok
-test_gate_g4_readme_and_announcement (test_xhttp_specs.TestXHTTPSpecifications.test_gate_g4_readme_and_announcement)
-Verify Gate G4: Public repository README and announcement text. ... ok
-test_json_blocks_in_markdown_parse_validly (test_xhttp_specs.TestXHTTPSpecifications.test_json_blocks_in_markdown_parse_validly)
-Extract and validate all JSON and HTTP-embedded JSON code blocks. ... ok
+test_gate_g4_no_local_file_urls_and_public_readiness (test_xhttp_specs.TestXHTTPSpecifications.test_gate_g4_no_local_file_urls_and_public_readiness)
+Verify Gate G4: Zero file:/// URLs, public repository README and announcement text. ... ok
+test_json_and_http_wire_blocks_parse_validly (test_xhttp_specs.TestXHTTPSpecifications.test_json_and_http_wire_blocks_parse_validly)
+Extract and validate all JSON blocks and HTTP request/response wire blocks. ... ok
+test_json_schemas_draft_2020_12_and_example_conformance (test_xhttp_specs.TestXHTTPSpecifications.test_json_schemas_draft_2020_12_and_example_conformance)
+Validate all 7 JSON schemas meet Draft 2020-12 structure and every example conforms to its schema. ... ok
 test_required_files_exist (test_xhttp_specs.TestXHTTPSpecifications.test_required_files_exist)
-Verify all 8 files checked by Codex QA exist and are substantial. ... ok
-test_x401_godns_mechanics (test_xhttp_specs.TestXHTTPSpecifications.test_x401_godns_mechanics)
-Verify x401 details: goDNS, Ed25519 PoP, DNS TXT, nonce verification. ... ok
-test_x404_semhash_and_oracle (test_xhttp_specs.TestXHTTPSpecifications.test_x404_semhash_and_oracle)
-Verify x404 details: Semantic Hash, verification oracle, work order. ... ok
-test_x410_revocation_tombstones (test_xhttp_specs.TestXHTTPSpecifications.test_x410_revocation_tombstones)
-Verify x410 details: reason codes, certificate, non-repudiation. ... ok
-test_x420_patience_actions (test_xhttp_specs.TestXHTTPSpecifications.test_x420_patience_actions)
-Verify x420 details: WAIT, PAY, DELEGATE, OUR_LADY, and FSCK_OFF. ... ok
+Verify all 8 canonical files exist and are substantial (>1000 bytes). ... ok
+test_x401_trust_chain_and_multipass_request (test_xhttp_specs.TestXHTTPSpecifications.test_x401_trust_chain_and_multipass_request)
+Verify x401 details: complete trust chain, TXT canonical signing, and base64url Multipass token. ... ok
+test_x404_semhash_pipeline_and_synthesis_request (test_xhttp_specs.TestXHTTPSpecifications.test_x404_semhash_pipeline_and_synthesis_request)
+Verify x404 details: 5-phase SemHash normalization pipeline, volatile param exclusion, and request example. ... ok
+test_x410_retention_semantics_and_request (test_xhttp_specs.TestXHTTPSpecifications.test_x410_retention_semantics_and_request)
+Verify x410 details: request wire example, active fast-path SLA vs permanent audit log. ... ok
+test_x420_negotiation_protocol_and_normative_fallback (test_xhttp_specs.TestXHTTPSpecifications.test_x420_negotiation_protocol_and_normative_fallback)
+Verify x420 details: correlation ID (queue_id), ActionSelectionEnvelope, action mechanics, and fallback. ... ok
 
 ----------------------------------------------------------------------
-Ran 10 tests in 0.004s
+Ran 11 tests in 0.008s
 
 OK
