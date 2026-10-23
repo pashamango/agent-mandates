@@ -1,0 +1,19 @@
+{
+  "ticket_id": "MIN-148",
+  "run_id": "run-36237216d591",
+  "builder": "agy@wolfram",
+  "target_repository": "https://github.com/pashamango/agent-mandates.git",
+  "branch": "minutta/min-148-min-117-spec-xhttp-open-standard-drafts",
+  "specifications": [
+    "xhttp-standards/README.md",
+    "xhttp-standards/ANNOUNCEMENT.md",
+    "xhttp-standards/GLOSSARY.md",
+    "xhttp-standards/WELL-KNOWN.md",
+    "xhttp-standards/specs/x401-multipass-auth.md",
+    "xhttp-standards/specs/x404-generative.md",
+    "xhttp-standards/specs/x410-revocation.md",
+    "xhttp-standards/specs/x420-patience.md"
+  ],
+  "test_suite": "tests/test_xhttp_specs.py",
+  "test_status": "10/10 PASS"
+}

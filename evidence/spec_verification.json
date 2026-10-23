@@ -1,0 +1,45 @@
+{
+  "ticket": "MIN-148",
+  "title": "MIN-117 [SPEC] xHTTP open standard drafts",
+  "version": "0.1.0-draft",
+  "directive": "Pavel Cherkashin 2026-10-20",
+  "gates": {
+    "G1": {
+      "status": "PASS",
+      "description": "Four drafts complete with envelope format, request/response examples, and ASCII flow diagrams",
+      "verified_specs": [
+        "xhttp-standards/specs/x401-multipass-auth.md",
+        "xhttp-standards/specs/x404-generative.md",
+        "xhttp-standards/specs/x410-revocation.md",
+        "xhttp-standards/specs/x420-patience.md"
+      ]
+    },
+    "G2": {
+      "status": "PASS",
+      "description": "Security Considerations and Interop Notes included in each specification with honest limitations",
+      "verified_specs": [
+        "xhttp-standards/specs/x401-multipass-auth.md",
+        "xhttp-standards/specs/x404-generative.md",
+        "xhttp-standards/specs/x410-revocation.md",
+        "xhttp-standards/specs/x420-patience.md"
+      ]
+    },
+    "G3": {
+      "status": "PASS",
+      "description": "Unified glossary and SemVer v0.1 versioning + changelog",
+      "glossary_file": "xhttp-standards/GLOSSARY.md"
+    },
+    "G4": {
+      "status": "PASS",
+      "description": "Public-ready repository README and announcement text",
+      "readme_file": "xhttp-standards/README.md",
+      "announcement_file": "xhttp-standards/ANNOUNCEMENT.md"
+    }
+  },
+  "conformance_checks": {
+    "total_unit_tests": 10,
+    "passing_unit_tests": 10,
+    "json_parsing_failures": 0,
+    "unparseable_examples": 0
+  }
+}

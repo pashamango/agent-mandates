@@ -1,0 +1,25 @@
+test_gate_g1_flow_diagrams_and_envelopes (test_xhttp_specs.TestXHTTPSpecifications.test_gate_g1_flow_diagrams_and_envelopes)
+Verify Gate G1: flow diagrams and envelope formats present in all specs. ... ok
+test_gate_g2_security_and_interop_sections (test_xhttp_specs.TestXHTTPSpecifications.test_gate_g2_security_and_interop_sections)
+Verify Gate G2: Security Considerations and Interop Notes in each spec. ... ok
+test_gate_g3_glossary_and_versioning (test_xhttp_specs.TestXHTTPSpecifications.test_gate_g3_glossary_and_versioning)
+Verify Gate G3: Unified glossary and SemVer v0.1 versioning policy. ... ok
+test_gate_g4_readme_and_announcement (test_xhttp_specs.TestXHTTPSpecifications.test_gate_g4_readme_and_announcement)
+Verify Gate G4: Public repository README and announcement text. ... ok
+test_json_blocks_in_markdown_parse_validly (test_xhttp_specs.TestXHTTPSpecifications.test_json_blocks_in_markdown_parse_validly)
+Extract and validate all JSON and HTTP-embedded JSON code blocks. ... ok
+test_required_files_exist (test_xhttp_specs.TestXHTTPSpecifications.test_required_files_exist)
+Verify all 8 files checked by Codex QA exist and are substantial. ... ok
+test_x401_godns_mechanics (test_xhttp_specs.TestXHTTPSpecifications.test_x401_godns_mechanics)
+Verify x401 details: goDNS, Ed25519 PoP, DNS TXT, nonce verification. ... ok
+test_x404_semhash_and_oracle (test_xhttp_specs.TestXHTTPSpecifications.test_x404_semhash_and_oracle)
+Verify x404 details: Semantic Hash, verification oracle, work order. ... ok
+test_x410_revocation_tombstones (test_xhttp_specs.TestXHTTPSpecifications.test_x410_revocation_tombstones)
+Verify x410 details: reason codes, certificate, non-repudiation. ... ok
+test_x420_patience_actions (test_xhttp_specs.TestXHTTPSpecifications.test_x420_patience_actions)
+Verify x420 details: WAIT, PAY, DELEGATE, OUR_LADY, and FSCK_OFF. ... ok
+
+----------------------------------------------------------------------
+Ran 10 tests in 0.004s
+
+OK
