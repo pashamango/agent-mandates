@@ -48,26 +48,29 @@ The implementation fulfills all four acceptance gates required by `MIN-147` / `M
 ```
 
 ### Acceptance Gates (END != DONE):
-- **G1: x402 Flow End-to-End**:
+- **G1: x402 Flow End-to-End & Strict Challenge Binding**:
   - `create-challenge`: Generates an HTTP 402 challenge with nonce, TTL, amount, and `GRACE` denomination.
   - `sign-payment`: Payer wallet signs the challenge using HMAC-SHA256.
-  - `settle-payment`: Facilitator cryptographically validates signature, applies budget guard, records ledger entry, and produces settlement receipt.
+  - `settle-payment`: Facilitator strictly validates that all signed payment fields (`challenge_id`, `deal_id`, `payer`, `recipient`, `amount`, `currency`, `nonce`) match the challenge, verifies HMAC signature, evaluates budget guard, records ledger entry, and produces settlement receipt.
+  - Reject any field substitution or tampering with exit code 1.
 - **G2: Matchmaker Reputation Badge & Independent Verification**:
   - `issue-badge`: Generates a verifiable badge specifying recipient DID, deal ID, tier (e.g. `PLATINUM`, `GOLD`), score, issued time, and expiration.
   - `verify-badge`: Independent zero-trust verification tool. Recalculates HMAC signature from raw payload, verifies issuer authority, and enforces expiration dates.
   - Reject tampered badges (e.g. score altered) and expired badges with exit code 1.
-- **G3: Codex Budget Guard**:
+- **G3: Codex Budget Guard & Finite Positive Enforcement**:
+  - Strict `math.isfinite(amount) and amount > 0` validation on all amounts.
   - Mandatory per-task spending cap (default: `100.0 GRACE`).
-  - Rolling weekly spending cap (default: `500.0 GRACE`).
+  - Rolling weekly spending cap (default: `500.0 GRACE`) with proven sequential exhaustion rejection (`WEEKLY_CAP_EXCEEDED`).
   - Emergency kill-switch (`ON` / `OFF`).
   - Persistent JSON audit ledger tracking `APPROVED` and `REJECTED_BUDGET_GUARD` events.
-  - Excessive transactions are rejected with exit code 1.
+  - Excessive or invalid transactions are rejected with exit code 1.
 - **G4: Evidence Bundle**:
   - Complete artifacts in `evidence/` directory:
-    - `G1_X402_FLOW.json`: Full request, challenge, payment, and settlement objects.
+    - `EVIDENCE.json`: Delivery envelope with canonical git coordinates and rework resolutions.
+    - `G1_X402_FLOW.json`: Full request, challenge, payment, settlement objects, and adversarial checks.
     - `G2_BADGE_VERIFICATION.json`: Issued badge, valid verification, and tamper detection proofs.
-    - `G3_BUDGET_GUARD.json`: Guard config, cap violation results, and ledger audit.
-    - `test_run.log`: Verifiable log of all 11 test assertions passing.
+    - `G3_BUDGET_GUARD.json`: Guard config, cap violation, weekly cap exhaustion, and negative amount rejection proofs.
+    - `test_run.log`: Verifiable log of all 16 test assertions passing.
     - `MANIFEST.sha256`: SHA-256 integrity manifest.
 
 ---
@@ -83,14 +86,15 @@ The implementation fulfills all four acceptance gates required by `MIN-147` / `M
 ├── test_flash.sh                      # Root test suite convenience wrapper
 ├── hackt-mandate/
 │   ├── flash_settlement.py            # Canonical implementation CLI & library
-│   └── test_flash.sh                  # Comprehensive 11-test acceptance suite
+│   ├── test_flash.sh                  # Comprehensive 16-test acceptance suite
+│   └── test_regression.py             # 20-test Python unit & regression suite
 └── evidence/
     ├── EVIDENCE.json                  # Machine-readable delivery envelope
     ├── G1_X402_FLOW.json              # Gate 1 evidence
     ├── G2_BADGE_VERIFICATION.json     # Gate 2 evidence
     ├── G3_BUDGET_GUARD.json           # Gate 3 evidence
     ├── MANIFEST.sha256                # SHA-256 manifest
-    └── test_run.log                   # 11/11 PASS test output
+    └── test_run.log                   # 16/16 PASS test output
 ```
 
 ---
@@ -106,7 +110,7 @@ bash test_flash.sh
 Expected output:
 ```
 ==============================================================================
-⚡ Starting Flash Settlement Test Suite (MIN-147 / MIN-116)
+⚡ Starting Flash Settlement Test Suite (MIN-147 / MIN-116 Rework)
    Simulation Notice: Testnet simulation using HMAC-SHA256 (no real funds)
    CLI: .../hackt-mandate/flash_settlement.py
 ==============================================================================
@@ -130,13 +134,23 @@ Test 9: [G3] Budget guard per-task cap enforcement...
   ✅ PASS: Transaction exceeding per-task cap rejected with exit code 1 and logged to ledger
 Test 10: [G3] Budget guard emergency kill-switch...
   ✅ PASS: Payment rejected while kill-switch is active (KILL_SWITCH_ACTIVE, exit code 1)
-Test 11: [G3/G4] Ledger audit summary verification...
-  ✅ PASS: Ledger audit verified: 1 approved, 2 rejected transactions recorded
+Test 11: [G3] Budget guard rolling weekly cap sequential exhaustion proof...
+  ✅ PASS: Rolling weekly cap exhaustion strictly enforced: rejected with WEEKLY_CAP_EXCEEDED and exit code 1
+Test 12: [G3] Negative and non-finite amount rejection (budget attack prevention)...
+  ✅ PASS: Negative amount (-1000.0) strictly rejected with INVALID_AMOUNT (exit code 1)
+Test 13: [G1] Adversarial challenge-binding check (substitution attacks)...
+  ✅ PASS: Adversarial field substitution (recipient mismatch) correctly rejected (exit code 1)
+Test 14: [G1-G4] Python comprehensive regression suite (20 tests)...
+  ✅ PASS: All 20 Python unit & regression tests passed cleanly
+Test 15: [G4] Git coordinates and delivery metadata conformance...
+  ✅ PASS: Git delivery branch and canonical repo in evidence match current delivery
+Test 16: [G3/G4] Ledger audit summary verification...
+  ✅ PASS: Ledger audit verified: 1 approved, 2 rejected transactions recorded in primary test ledger
 ==============================================================================
 📊 Test Summary:
-   Passed: 11, Failed: 0
+   Passed: 16, Failed: 0
 ==============================================================================
-🎉 All acceptance gates (G1-G4) successfully passed!
+🎉 All acceptance gates (G1-G4) successfully passed! All 16 suite tests passed.
 ```
 
 ### Clean Working Tree Guarantee

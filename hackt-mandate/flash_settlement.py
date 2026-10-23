@@ -19,6 +19,7 @@ import os
 import sys
 import json
 import time
+import math
 import uuid
 import hmac
 import hashlib
@@ -42,6 +43,17 @@ ROLLING_WINDOW_SECONDS = 7 * 24 * 3600  # 7 days
 def canonical_bytes(data: Dict[str, Any]) -> bytes:
     """Produces deterministic canonical UTF-8 bytes for cryptographic signing."""
     return json.dumps(data, sort_keys=True, separators=(',', ':')).encode('utf-8')
+
+
+def validate_amount(amount: Any) -> float:
+    """Validates that amount is a finite, positive number (> 0). Raises ValueError otherwise."""
+    try:
+        val = float(amount)
+    except (TypeError, ValueError):
+        raise ValueError(f"Invalid amount '{amount}': must be numeric")
+    if not (math.isfinite(val) and val > 0):
+        raise ValueError(f"Invalid amount {val}: must be a finite positive number (> 0)")
+    return val
 
 
 def compute_hmac(key: str, data: Dict[str, Any]) -> str:
@@ -112,42 +124,59 @@ class BudgetGuard:
             if tx.get("status") == "APPROVED":
                 tx_time = tx.get("timestamp", 0)
                 if tx_time >= window_start:
-                    total += float(tx.get("amount", 0.0))
+                    try:
+                        amt = float(tx.get("amount", 0.0))
+                        if math.isfinite(amt) and amt > 0:
+                            total += amt
+                    except (TypeError, ValueError):
+                        pass
         return total
 
     def evaluate_request(
         self, amount: float, currency: str, deal_id: str
     ) -> Tuple[bool, str, Dict[str, Any]]:
         """Evaluates whether an outgoing payment passes all budget guards."""
-        if self.is_kill_switch_active():
-            return False, "KILL_SWITCH_ACTIVE", {
+        try:
+            val = validate_amount(amount)
+        except ValueError as e:
+            return False, "INVALID_AMOUNT", {
                 "allowed": False,
-                "reason": "KILL_SWITCH_ACTIVE",
-                "kill_switch": True,
+                "reason": "INVALID_AMOUNT",
+                "error": str(e),
                 "amount": amount,
                 "currency": currency,
                 "simulation": True,
             }
 
-        if amount > self.per_task_cap:
+        if self.is_kill_switch_active():
+            return False, "KILL_SWITCH_ACTIVE", {
+                "allowed": False,
+                "reason": "KILL_SWITCH_ACTIVE",
+                "kill_switch": True,
+                "amount": val,
+                "currency": currency,
+                "simulation": True,
+            }
+
+        if val > self.per_task_cap:
             return False, "PER_TASK_CAP_EXCEEDED", {
                 "allowed": False,
                 "reason": "PER_TASK_CAP_EXCEEDED",
-                "amount": amount,
+                "amount": val,
                 "per_task_cap": self.per_task_cap,
                 "currency": currency,
                 "simulation": True,
             }
 
         weekly_spent = self.get_weekly_spent()
-        if weekly_spent + amount > self.weekly_cap:
+        if weekly_spent + val > self.weekly_cap:
             return False, "WEEKLY_CAP_EXCEEDED", {
                 "allowed": False,
                 "reason": "WEEKLY_CAP_EXCEEDED",
-                "amount": amount,
+                "amount": val,
                 "weekly_spent": weekly_spent,
                 "weekly_cap": self.weekly_cap,
-                "projected_total": weekly_spent + amount,
+                "projected_total": weekly_spent + val,
                 "currency": currency,
                 "simulation": True,
             }
@@ -155,11 +184,11 @@ class BudgetGuard:
         return True, "APPROVED", {
             "allowed": True,
             "reason": "WITHIN_LIMITS",
-            "amount": amount,
+            "amount": val,
             "per_task_cap": self.per_task_cap,
             "weekly_spent": weekly_spent,
             "weekly_cap": self.weekly_cap,
-            "remaining_weekly": self.weekly_cap - (weekly_spent + amount),
+            "remaining_weekly": self.weekly_cap - (weekly_spent + val),
             "currency": currency,
             "simulation": True,
         }
@@ -175,11 +204,21 @@ class BudgetGuard:
         tx_hash: Optional[str] = None,
     ) -> Dict[str, Any]:
         data = self._load_ledger()
+        if status == "APPROVED":
+            val = validate_amount(amount)
+        else:
+            try:
+                val = float(amount)
+                if not math.isfinite(val):
+                    val = 0.0
+            except (TypeError, ValueError):
+                val = 0.0
+
         entry = {
             "entry_id": f"ledg-{uuid.uuid4().hex[:12]}",
             "timestamp": int(time.time()),
             "deal_id": deal_id,
-            "amount": float(amount),
+            "amount": val,
             "currency": currency,
             "recipient": recipient,
             "status": status,
@@ -220,6 +259,7 @@ def create_challenge(
     facilitator: str = FACILITATOR_URN,
 ) -> Dict[str, Any]:
     """Generates an HTTP 402 Payment Required challenge payload."""
+    val = validate_amount(amount)
     now = int(time.time())
     challenge = {
         "status_code": 402,
@@ -228,7 +268,7 @@ def create_challenge(
         "deal_id": deal_id,
         "payer": payer,
         "recipient": recipient,
-        "amount": float(amount),
+        "amount": val,
         "currency": currency,
         "nonce": uuid.uuid4().hex,
         "issued_at": now,
@@ -251,13 +291,15 @@ def sign_payment(
     if now > challenge.get("expires_at", 0):
         raise ValueError("Challenge has expired")
 
+    val = validate_amount(challenge["amount"])
+
     payment_body = {
         "payment_id": f"x402-pay-{uuid.uuid4().hex[:16]}",
         "challenge_id": challenge["challenge_id"],
         "deal_id": challenge["deal_id"],
         "payer": payer_id or challenge["payer"],
         "recipient": challenge["recipient"],
-        "amount": float(challenge["amount"]),
+        "amount": val,
         "currency": challenge["currency"],
         "nonce": challenge["nonce"],
         "timestamp": now,
@@ -285,9 +327,33 @@ def settle_payment(
     """
     now = int(time.time())
 
-    # 1. Challenge validation
+    # 1. Challenge validation & cross-binding checks (G1)
     if challenge.get("challenge_id") != payment.get("challenge_id"):
         raise ValueError("Payment challenge_id does not match challenge")
+    if challenge.get("deal_id") != payment.get("deal_id"):
+        raise ValueError("Payment deal_id does not match challenge")
+    if challenge.get("payer") != payment.get("payer"):
+        raise ValueError("Payment payer does not match challenge")
+    if challenge.get("recipient") != payment.get("recipient"):
+        raise ValueError("Payment recipient does not match challenge")
+    if challenge.get("currency") != payment.get("currency"):
+        raise ValueError("Payment currency does not match challenge")
+    if challenge.get("nonce") != payment.get("nonce"):
+        raise ValueError("Payment nonce does not match challenge")
+
+    try:
+        ch_amount = validate_amount(challenge.get("amount"))
+    except ValueError as e:
+        raise ValueError(f"Invalid challenge amount: {e}")
+
+    try:
+        pay_amount = validate_amount(payment.get("amount"))
+    except ValueError as e:
+        raise ValueError(f"Invalid payment amount: {e}")
+
+    if ch_amount != pay_amount:
+        raise ValueError(f"Payment amount does not match challenge: payment={pay_amount}, challenge={ch_amount}")
+
     if now > challenge.get("expires_at", 0):
         raise ValueError("Challenge has expired")
 
@@ -299,8 +365,8 @@ def settle_payment(
     if not verify_hmac(payer_key, body_for_verify, sig):
         raise ValueError("Invalid payer wallet signature")
 
-    # 3. Budget guard evaluation
-    amount = float(payment["amount"])
+    # 3. Budget guard evaluation (G3)
+    amount = pay_amount
     currency = payment["currency"]
     deal_id = payment["deal_id"]
     recipient = payment["recipient"]
@@ -392,6 +458,7 @@ def issue_badge(
     ttl_days: int = 30,
 ) -> Dict[str, Any]:
     """Issues a cryptographically signed matchmaker reputation badge."""
+    val = validate_amount(amount)
     now = int(time.time())
     expires_at = now + (ttl_days * 86400)
     badge_body = {
@@ -403,7 +470,7 @@ def issue_badge(
         "badge_type": "FLASH_SETTLEMENT_MATCHMAKER",
         "tier": tier,
         "reputation_score": int(score),
-        "settlement_amount": float(amount),
+        "settlement_amount": val,
         "currency": currency,
         "issued_at": now,
         "expires_at": expires_at,
@@ -573,20 +640,38 @@ def main():
     args = parse_args()
 
     if args.command == "create-challenge":
-        ch = create_challenge(
-            deal_id=args.deal_id,
-            payer=args.payer,
-            recipient=args.recipient,
-            amount=args.amount,
-            currency=args.currency,
-            ttl_sec=args.ttl_sec,
-        )
+        try:
+            ch = create_challenge(
+                deal_id=args.deal_id,
+                payer=args.payer,
+                recipient=args.recipient,
+                amount=args.amount,
+                currency=args.currency,
+                ttl_sec=args.ttl_sec,
+            )
+        except ValueError as e:
+            err = {
+                "status": "INVALID_CHALLENGE",
+                "error": str(e),
+                "simulation": True,
+            }
+            output_json(err, args.out)
+            sys.exit(1)
         output_json(ch, args.out)
 
     elif args.command == "sign-payment":
         with open(args.challenge, 'r', encoding='utf-8') as f:
             ch = json.load(f)
-        pay = sign_payment(ch, payer_key=args.payer_key, payer_id=args.payer_id)
+        try:
+            pay = sign_payment(ch, payer_key=args.payer_key, payer_id=args.payer_id)
+        except ValueError as e:
+            err = {
+                "status": "INVALID_PAYMENT_SIGNING",
+                "error": str(e),
+                "simulation": True,
+            }
+            output_json(err, args.out)
+            sys.exit(1)
         output_json(pay, args.out)
 
     elif args.command == "settle-payment":
@@ -600,32 +685,52 @@ def main():
             per_task_cap=args.per_task_cap,
             weekly_cap=args.weekly_cap,
         )
-        res = settle_payment(
-            payment=pay,
-            challenge=ch,
-            payer_key=args.payer_key,
-            facilitator_key=args.facilitator_key,
-            budget_guard=guard,
-            issuer_key=args.issuer_key,
-            badge_score=args.badge_score,
-            badge_tier=args.badge_tier,
-        )
+        try:
+            res = settle_payment(
+                payment=pay,
+                challenge=ch,
+                payer_key=args.payer_key,
+                facilitator_key=args.facilitator_key,
+                budget_guard=guard,
+                issuer_key=args.issuer_key,
+                badge_score=args.badge_score,
+                badge_tier=args.badge_tier,
+            )
+        except ValueError as e:
+            res = {
+                "status": "REJECTED_INVALID_PAYMENT",
+                "error": str(e),
+                "simulation": True,
+                "crypto_scheme": CRYPTO_SCHEME,
+            }
+            output_json(res, args.out)
+            sys.exit(1)
+
         output_json(res, args.out)
         if res.get("status") == "REJECTED_BUDGET_GUARD":
             sys.exit(1)
 
     elif args.command == "issue-badge":
-        badge = issue_badge(
-            deal_id=args.deal_id,
-            recipient=args.recipient,
-            settlement_id=args.settlement_id,
-            amount=args.amount,
-            currency=args.currency,
-            score=args.score,
-            tier=args.tier,
-            issuer_key=args.issuer_key,
-            ttl_days=args.ttl_days,
-        )
+        try:
+            badge = issue_badge(
+                deal_id=args.deal_id,
+                recipient=args.recipient,
+                settlement_id=args.settlement_id,
+                amount=args.amount,
+                currency=args.currency,
+                score=args.score,
+                tier=args.tier,
+                issuer_key=args.issuer_key,
+                ttl_days=args.ttl_days,
+            )
+        except ValueError as e:
+            err = {
+                "status": "INVALID_BADGE_REQUEST",
+                "error": str(e),
+                "simulation": True,
+            }
+            output_json(err, args.out)
+            sys.exit(1)
         output_json(badge, args.out)
 
     elif args.command == "verify-badge":

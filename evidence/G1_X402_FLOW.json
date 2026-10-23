@@ -1,6 +1,6 @@
 {
   "acceptance_gate": "G1",
-  "description": "x402 Flow End-to-End: Request -> 402 Challenge -> Payment Signature -> Facilitator Verification -> Settlement Confirmation",
+  "description": "x402 Flow End-to-End: Request -> 402 Challenge -> Payment Signature -> Facilitator Strict Cross-Binding & Verification -> Settlement Confirmation",
   "currency": "GRACE",
   "simulation": true,
   "crypto_scheme": "TESTNET_SIMULATED_HMAC_SHA256",
@@ -71,5 +71,15 @@
       "simulation_notice": "[SIMULATION NOTICE] Flash Settlement Prototype running in TESTNET SIMULATION mode (HMAC-SHA256). No real funds or real private keys used.",
       "signature": "4738f2ba9dad7303467f010845cd1cb9da0ccec955ecce2c03463e762ea2f559"
     }
+  },
+  "step_4_adversarial_cross_binding_checks": {
+    "challenge_id_mismatch": "REJECTED_INVALID_PAYMENT: Payment challenge_id does not match challenge",
+    "deal_id_mismatch": "REJECTED_INVALID_PAYMENT: Payment deal_id does not match challenge",
+    "payer_mismatch": "REJECTED_INVALID_PAYMENT: Payment payer does not match challenge",
+    "recipient_mismatch": "REJECTED_INVALID_PAYMENT: Payment recipient does not match challenge",
+    "amount_mismatch": "REJECTED_INVALID_PAYMENT: Payment amount does not match challenge",
+    "currency_mismatch": "REJECTED_INVALID_PAYMENT: Payment currency does not match challenge",
+    "nonce_mismatch": "REJECTED_INVALID_PAYMENT: Payment nonce does not match challenge",
+    "tampered_signature": "REJECTED_INVALID_PAYMENT: Invalid payer wallet signature"
   }
 }

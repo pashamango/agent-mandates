@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Flash Settlement Protocol Acceptance Suite: G1 - G4
+# Flash Settlement Protocol Acceptance Suite: G1 - G4 (MIN-147 Rework)
 # Ticket: MIN-147 (MIN-116)
 # ==============================================================================
 set -euo pipefail
@@ -8,6 +8,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CLI_PY="${SCRIPT_DIR}/flash_settlement.py"
+REGRESSION_PY="${SCRIPT_DIR}/test_regression.py"
 
 TMP_DIR=$(mktemp -d /tmp/flash_settlement_test_XXXXXX)
 trap 'rm -rf "${TMP_DIR}"' EXIT
@@ -26,7 +27,7 @@ log_fail() {
 }
 
 echo "=============================================================================="
-echo "⚡ Starting Flash Settlement Test Suite (MIN-147 / MIN-116)"
+echo "⚡ Starting Flash Settlement Test Suite (MIN-147 / MIN-116 Rework)"
 echo "   Simulation Notice: Testnet simulation using HMAC-SHA256 (no real funds)"
 echo "   CLI: ${CLI_PY}"
 echo "=============================================================================="
@@ -218,16 +219,105 @@ else
   log_pass "Payment rejected while kill-switch is active (KILL_SWITCH_ACTIVE, exit code 1)"
 fi
 
-# Reset kill-switch for audit summary
+# Reset kill-switch for subsequent tests
 python3 "${CLI_PY}" budget-kill-switch --ledger "${TEST_LEDGER}" --state "OFF" >/dev/null
 
-# Test 11: G3 & G4 - Ledger Audit Summary & Integrity
-echo "Test 11: [G3/G4] Ledger audit summary verification..."
+# Test 11: G3 - Budget Guard: Rolling Weekly Cap Sequential Exhaustion Proof
+echo "Test 11: [G3] Budget guard rolling weekly cap sequential exhaustion proof..."
+WEEKLY_TEST_LEDGER="${TMP_DIR}/weekly_cap_test_ledger.json"
+# Settle 3 transactions of 90 GRACE each (Total = 270 GRACE, within 300 cap, each <= 100 per-task cap)
+for i in 1 2 3; do
+  W_CH="${TMP_DIR}/wc_ch_${i}.json"
+  W_PAY="${TMP_DIR}/wc_pay_${i}.json"
+  python3 "${CLI_PY}" create-challenge --deal-id "deal-wc-seq-${i}" --payer "${PAYER_DID}" --recipient "${MATCHMAKER_DID}" --amount 90.0 --out "${W_CH}" >/dev/null
+  python3 "${CLI_PY}" sign-payment --challenge "${W_CH}" --payer-key "${PAYER_SIM_KEY}" --out "${W_PAY}" >/dev/null
+  python3 "${CLI_PY}" settle-payment --payment "${W_PAY}" --challenge "${W_CH}" --payer-key "${PAYER_SIM_KEY}" --ledger "${WEEKLY_TEST_LEDGER}" --per-task-cap 100.0 --weekly-cap 300.0 >/dev/null
+done
+
+# Now attempt 4th transaction of 50 GRACE (50 <= 100 per-task cap, but 270 + 50 = 320 > 300 weekly cap)
+W_CH_OVER="${TMP_DIR}/wc_ch_over.json"
+W_PAY_OVER="${TMP_DIR}/wc_pay_over.json"
+W_OUT_OVER="${TMP_DIR}/wc_out_over.json"
+python3 "${CLI_PY}" create-challenge --deal-id "deal-wc-seq-overflow" --payer "${PAYER_DID}" --recipient "${MATCHMAKER_DID}" --amount 50.0 --out "${W_CH_OVER}" >/dev/null
+python3 "${CLI_PY}" sign-payment --challenge "${W_CH_OVER}" --payer-key "${PAYER_SIM_KEY}" --out "${W_PAY_OVER}" >/dev/null
+
+if python3 "${CLI_PY}" settle-payment --payment "${W_PAY_OVER}" --challenge "${W_CH_OVER}" --payer-key "${PAYER_SIM_KEY}" --ledger "${WEEKLY_TEST_LEDGER}" --per-task-cap 100.0 --weekly-cap 300.0 --out "${W_OUT_OVER}" >/dev/null 2>&1; then
+  log_fail "Transaction exceeding rolling weekly cap was incorrectly approved"
+else
+  if grep -q "WEEKLY_CAP_EXCEEDED" "${W_OUT_OVER}" && grep -q "WEEKLY_CAP_EXCEEDED" "${WEEKLY_TEST_LEDGER}"; then
+    log_pass "Rolling weekly cap exhaustion strictly enforced: rejected with WEEKLY_CAP_EXCEEDED and exit code 1"
+  else
+    log_fail "WEEKLY_CAP_EXCEEDED rejection not properly recorded in ledger"
+  fi
+fi
+
+# Test 12: G3 - Negative and Non-Finite Amount Strict Rejection
+echo "Test 12: [G3] Negative and non-finite amount rejection (budget attack prevention)..."
+NEG_OUT="${TMP_DIR}/neg_check.json"
+if python3 "${CLI_PY}" budget-check --deal-id "deal-neg" --amount -1000.0 --ledger "${TEST_LEDGER}" > "${NEG_OUT}" 2>&1; then
+  log_fail "Negative amount (-1000.0) was accepted by budget guard"
+else
+  if grep -q "INVALID_AMOUNT" "${NEG_OUT}"; then
+    log_pass "Negative amount (-1000.0) strictly rejected with INVALID_AMOUNT (exit code 1)"
+  else
+    log_fail "Negative amount rejection missing INVALID_AMOUNT reason"
+  fi
+fi
+
+# Test 13: G1 - Adversarial Challenge-Binding Check (Field Tampering)
+echo "Test 13: [G1] Adversarial challenge-binding check (substitution attacks)..."
+# Create valid challenge and signed payment
+ADV_CH="${TMP_DIR}/adv_challenge.json"
+python3 "${CLI_PY}" create-challenge --deal-id "deal-adv-orig" --payer "${PAYER_DID}" --recipient "${MATCHMAKER_DID}" --amount 30.0 --currency "GRACE" --out "${ADV_CH}" >/dev/null
+ADV_PAY="${TMP_DIR}/adv_payment.json"
+python3 "${CLI_PY}" sign-payment --challenge "${ADV_CH}" --payer-key "${PAYER_SIM_KEY}" --out "${ADV_PAY}" >/dev/null
+
+# Tamper recipient in challenge to simulate substitution
+TAMPERED_ADV_CH="${TMP_DIR}/adv_tampered_ch.json"
+sed 's/"recipient": "[^"]*"/"recipient": "did:key:z6Mkhacker999"/g' "${ADV_CH}" > "${TAMPERED_ADV_CH}"
+
+ADV_OUT="${TMP_DIR}/adv_out.json"
+if python3 "${CLI_PY}" settle-payment --payment "${ADV_PAY}" --challenge "${TAMPERED_ADV_CH}" --payer-key "${PAYER_SIM_KEY}" --ledger "${TEST_LEDGER}" --out "${ADV_OUT}" >/dev/null 2>&1; then
+  log_fail "Payment with mismatched recipient was incorrectly settled"
+else
+  if grep -q "recipient does not match challenge" "${ADV_OUT}"; then
+    log_pass "Adversarial field substitution (recipient mismatch) correctly rejected (exit code 1)"
+  else
+    log_fail "Adversarial field substitution failed without specific challenge mismatch error"
+  fi
+fi
+
+# Test 14: G1-G4 - Python Comprehensive Regression Suite
+echo "Test 14: [G1-G4] Python comprehensive regression suite (20 tests)..."
+if python3 "${REGRESSION_PY}" > "${TMP_DIR}/regression.log" 2>&1; then
+  REG_COUNT=$(grep -o "Ran [0-9]* tests" "${TMP_DIR}/regression.log" | awk '{print $2}')
+  log_pass "All ${REG_COUNT} Python unit & regression tests passed cleanly"
+else
+  cat "${TMP_DIR}/regression.log"
+  log_fail "Python regression tests failed"
+fi
+
+# Test 15: G4 - Git Coordinates and Delivery Conformance
+echo "Test 15: [G4] Git coordinates and delivery metadata conformance..."
+EVIDENCE_FILE="${REPO_ROOT}/evidence/EVIDENCE.json"
+BRANCH_IN_EVIDENCE=$(python3 -c "import json; d=json.load(open('${EVIDENCE_FILE}')); print(d.get('branch') or d.get('git', {}).get('branch', ''))")
+REPO_IN_EVIDENCE=$(python3 -c "import json; d=json.load(open('${EVIDENCE_FILE}')); print(d.get('repo_url') or d.get('git', {}).get('repo_url', ''))")
+EXPECTED_BRANCH="minutta/min-147-min-116-build-flash-settlement-x402-micropayment-badge"
+EXPECTED_REPO="https://github.com/pashamango/agent-mandates.git"
+
+if [ "${BRANCH_IN_EVIDENCE}" = "${EXPECTED_BRANCH}" ] && [ "${REPO_IN_EVIDENCE}" = "${EXPECTED_REPO}" ]; then
+  log_pass "Git delivery branch and canonical repo in evidence match current delivery"
+else
+  log_fail "Git delivery metadata mismatch: branch='${BRANCH_IN_EVIDENCE}', repo='${REPO_IN_EVIDENCE}'"
+fi
+
+# Test 16: G3 & G4 - Ledger Audit Summary & Integrity
+echo "Test 16: [G3/G4] Ledger audit summary verification..."
 SUMMARY_OUT="${TMP_DIR}/summary.json"
 python3 "${CLI_PY}" budget-summary --ledger "${TEST_LEDGER}" > "${SUMMARY_OUT}"
 
 if grep -q '"approved_count": 1' "${SUMMARY_OUT}" && grep -q '"rejected_count": 2' "${SUMMARY_OUT}" && grep -q '"total_transactions": 3' "${SUMMARY_OUT}"; then
-  log_pass "Ledger audit verified: 1 approved, 2 rejected transactions recorded"
+  log_pass "Ledger audit verified: 1 approved, 2 rejected transactions recorded in primary test ledger"
 else
   log_fail "Ledger audit counts mismatch"
 fi
@@ -238,7 +328,7 @@ echo "   Passed: ${PASSED_COUNT}, Failed: ${FAILED_COUNT}"
 echo "=============================================================================="
 
 if [ "${FAILED_COUNT}" -eq 0 ]; then
-  echo "🎉 All acceptance gates (G1-G4) successfully passed!"
+  echo "🎉 All acceptance gates (G1-G4) successfully passed! All 16 suite tests passed."
   exit 0
 else
   echo "❌ One or more tests failed."

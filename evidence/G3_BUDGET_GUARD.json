@@ -1,6 +1,6 @@
 {
   "acceptance_gate": "G3",
-  "description": "Codex Budget Guard: Per-Task Cap, Weekly Kill-Switch, and Persistent Ledger",
+  "description": "Codex Budget Guard: Per-Task Cap, Rolling Weekly Cap Exhaustion, Kill-Switch, Positive Finite Validation, and Persistent Ledger",
   "simulation": true,
   "guard_configuration": {
     "per_task_cap": 100.0,
@@ -24,6 +24,42 @@
       },
       "simulation": true,
       "crypto_scheme": "TESTNET_SIMULATED_HMAC_SHA256"
+    }
+  },
+  "rejection_test_weekly_cap": {
+    "description": "Sequential transactions exhaust 300.0 weekly cap (3x90=270 settled). Fourth transaction of 50.0 within per-task cap is rejected.",
+    "attempted_amount": 50.0,
+    "current_weekly_spent": 270.0,
+    "weekly_cap": 300.0,
+    "projected_total": 320.0,
+    "result": {
+      "status": "REJECTED_BUDGET_GUARD",
+      "allowed": false,
+      "reason": "WEEKLY_CAP_EXCEEDED",
+      "guard_info": {
+        "allowed": false,
+        "reason": "WEEKLY_CAP_EXCEEDED",
+        "amount": 50.0,
+        "weekly_spent": 270.0,
+        "weekly_cap": 300.0,
+        "projected_total": 320.0,
+        "currency": "GRACE",
+        "simulation": true
+      },
+      "simulation": true,
+      "crypto_scheme": "TESTNET_SIMULATED_HMAC_SHA256"
+    }
+  },
+  "rejection_test_negative_amount": {
+    "description": "Adversarial bypass attempt using negative amount (-1000.0) is strictly rejected with INVALID_AMOUNT and cannot reduce weekly spent.",
+    "attempted_amount": -1000.0,
+    "result": {
+      "allowed": false,
+      "reason": "INVALID_AMOUNT",
+      "error": "Invalid amount -1000.0: must be a finite positive number (> 0)",
+      "amount": -1000.0,
+      "currency": "GRACE",
+      "simulation": true
     }
   },
   "rejection_test_kill_switch": {

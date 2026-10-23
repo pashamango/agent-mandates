@@ -1,7 +1,7 @@
 {
   "ticket": "MIN-147",
   "title": "MIN-116 [BUILD] Flash settlement: x402 micropayment + badge",
-  "run_id": "run-1126b2523b0d",
+  "run_id": "run-27159a7cf8d1",
   "builder": "agy@wolfram",
   "qa_reviewer": "Codex",
   "date": "2026-10-23",
@@ -11,11 +11,24 @@
   "branch": "minutta/min-147-min-116-build-flash-settlement-x402-micropayment-badge",
   "simulation": true,
   "crypto_scheme": "TESTNET_SIMULATED_HMAC_SHA256",
+  "git": {
+    "repo_url": "https://github.com/pashamango/agent-mandates.git",
+    "repo_mirror": "https://github.com/pashamango/hackt-com.git",
+    "branch": "minutta/min-147-min-116-build-flash-settlement-x402-micropayment-badge"
+  },
+  "rework_resolutions": {
+    "item_1_g1_challenge_binding": "RESOLVED: All signed payment fields (challenge_id, deal_id, payer, recipient, amount, currency, nonce) strictly validated against the 402 challenge. Adversarial substitution tests confirm rejection.",
+    "item_2_g3_positive_finite_amounts": "RESOLVED: Strict math.isfinite(amount) and amount > 0 validation enforced across all entrypoints. Negative, zero, NaN, and +/- Inf amounts rejected with INVALID_AMOUNT; cannot reduce weekly_spent.",
+    "item_3_g3_weekly_cap_proof": "RESOLVED: Sequential transactions exhaust rolling weekly cap (3x90=270 settled within 300 cap). Fourth transaction of 50 within per-task cap is rejected with WEEKLY_CAP_EXCEEDED and logged.",
+    "item_4_g4_git_coordinates": "RESOLVED: Stale hardcoded commit/tree hashes purged from EVIDENCE.json. Canonical git coordinates (repo_url and branch) verified by suite; exact commit/tree hashes published in Protocol Phi handoff envelope.",
+    "item_5_regression_test_suite": "RESOLVED: 20 comprehensive Python unit and regression tests added in test_regression.py covering field mismatch, amount edge cases, weekly cap, and git coordinates."
+  },
   "acceptance_gates": {
     "G1_x402_flow": {
       "status": "PASS",
       "evidence_file": "evidence/G1_X402_FLOW.json",
-      "currency": "GRACE"
+      "currency": "GRACE",
+      "challenge_binding": "STRICT_ENFORCED"
     },
     "G2_matchmaker_badge": {
       "status": "PASS",
@@ -28,6 +41,8 @@
       "evidence_file": "evidence/G3_BUDGET_GUARD.json",
       "per_task_cap_enforced": true,
       "weekly_cap_enforced": true,
+      "weekly_cap_exhaustion_proven": true,
+      "positive_finite_validation_enforced": true,
       "kill_switch_proven": true,
       "ledger_persistence": true
     },
@@ -35,10 +50,9 @@
       "status": "PASS",
       "manifest_file": "evidence/MANIFEST.sha256",
       "test_log": "evidence/test_run.log",
-      "tests_passed": 11,
+      "tests_passed": 16,
+      "regression_tests_passed": 20,
       "tests_failed": 0
     }
-  },
-  "commit_sha": "e0b482e9c093e7bc2e906b4ed815ab11a49a5056",
-  "tree_sha": "07c575d4d15bf526216ebff0906a17a7bd643a3d"
+  }
 }

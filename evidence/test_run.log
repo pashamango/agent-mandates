@@ -1,5 +1,5 @@
 ==============================================================================
-⚡ Starting Flash Settlement Test Suite (MIN-147 / MIN-116)
+⚡ Starting Flash Settlement Test Suite (MIN-147 / MIN-116 Rework)
    Simulation Notice: Testnet simulation using HMAC-SHA256 (no real funds)
    CLI: /Users/pavelcherkashin/ChitAkasha-Wolfram/worktrees/MIN-147-FLASH-SETTLEMENT-0001/hackt-mandate/flash_settlement.py
 ==============================================================================
@@ -23,10 +23,20 @@ Test 9: [G3] Budget guard per-task cap enforcement...
   ✅ PASS: Transaction exceeding per-task cap rejected with exit code 1 and logged to ledger
 Test 10: [G3] Budget guard emergency kill-switch...
   ✅ PASS: Payment rejected while kill-switch is active (KILL_SWITCH_ACTIVE, exit code 1)
-Test 11: [G3/G4] Ledger audit summary verification...
-  ✅ PASS: Ledger audit verified: 1 approved, 2 rejected transactions recorded
+Test 11: [G3] Budget guard rolling weekly cap sequential exhaustion proof...
+  ✅ PASS: Rolling weekly cap exhaustion strictly enforced: rejected with WEEKLY_CAP_EXCEEDED and exit code 1
+Test 12: [G3] Negative and non-finite amount rejection (budget attack prevention)...
+  ✅ PASS: Negative amount (-1000.0) strictly rejected with INVALID_AMOUNT (exit code 1)
+Test 13: [G1] Adversarial challenge-binding check (substitution attacks)...
+  ✅ PASS: Adversarial field substitution (recipient mismatch) correctly rejected (exit code 1)
+Test 14: [G1-G4] Python comprehensive regression suite (20 tests)...
+  ✅ PASS: All 20 Python unit & regression tests passed cleanly
+Test 15: [G4] Git coordinates and delivery metadata conformance...
+  ✅ PASS: Git delivery branch and canonical repo in evidence match current delivery
+Test 16: [G3/G4] Ledger audit summary verification...
+  ✅ PASS: Ledger audit verified: 1 approved, 2 rejected transactions recorded in primary test ledger
 ==============================================================================
 📊 Test Summary:
-   Passed: 11, Failed: 0
+   Passed: 16, Failed: 0
 ==============================================================================
-🎉 All acceptance gates (G1-G4) successfully passed!
+🎉 All acceptance gates (G1-G4) successfully passed! All 16 suite tests passed.
