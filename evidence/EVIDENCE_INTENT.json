@@ -1,0 +1,20 @@
+{
+  "ticket": "MIN-146",
+  "task_title": "MIN-115 [BUILD] Flash Protocol: intent board",
+  "timestamp": "2026-10-23T12:27:08Z",
+  "authority": "Principal Pavel Cherkashin (pavel@mindrock.capital)",
+  "acceptance_gates": {
+    "G1_INTENT_SCHEMA": "PASS",
+    "G2_PUBLISH_MATCH_E2E": "PASS",
+    "G3_STRANGER_MULTIPASS_VERIFY": "PASS",
+    "G4_EVIDENCE_BUNDLE": "PASS"
+  },
+  "metrics": {
+    "tests_passed": 13,
+    "tests_failed": 0,
+    "cryptographic_scheme": "Ed25519 (RFC 8032) + goDNS TXT",
+    "zero_loss_rollback_verified": true,
+    "human_in_the_loop_gate": "валяй"
+  },
+  "simulation": true
+}

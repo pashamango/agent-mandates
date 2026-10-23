@@ -1,0 +1,37 @@
+{
+  "matched": true,
+  "deal": {
+    "proto": "flash-deal-v0.1",
+    "deal_id": "deal_flash_c222e2d6d303",
+    "category": "compute:gpu",
+    "status": "MATCHED_PENDING_APPROVAL",
+    "settlement_terms": {
+      "amount": 25.0,
+      "currency": "GRACE",
+      "buyer_budget": 30.0,
+      "seller_ask": 25.0
+    },
+    "buyer": {
+      "did": "did:key:z6Mkf3nykVJqxRwvGiJp8AhG9M1tqGxjNqXBZ5d4axG96L7v",
+      "godns_locator": "_mandate.alpha.hackt.com",
+      "intent_id": "intent_f89817db45f0",
+      "multipass_verified": true
+    },
+    "seller": {
+      "did": "did:key:z6Mkf75D2Njrcgo4tMD1xQwkh37gDLrpF7cjUseqZCace8Di",
+      "godns_locator": "_mandate.beta.hackt.com",
+      "intent_id": "intent_497aa5fdf110",
+      "multipass_verified": true
+    },
+    "matchmaker_did": "did:key:z6MknGc3ocHs3zgjJvfKBSF35K43AYM822554dooPWBZg308",
+    "human_in_the_loop": {
+      "required": true,
+      "status": "PENDING_DECISION",
+      "prompt": "Финальный тап человека ('валяй') для закрытия сделки"
+    },
+    "created_at": "2026-10-23T12:27:03Z",
+    "simulation": true
+  },
+  "deal_id": "deal_flash_c222e2d6d303",
+  "status": "MATCHED_PENDING_APPROVAL"
+}
