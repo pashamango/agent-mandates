@@ -355,9 +355,9 @@ EOF
 
 (cd "${LOCAL_EVIDENCE}" && shasum -a 256 *.json > MANIFEST.sha256)
 
-# If repository evidence dir is writable, copy into it as well
-if [ -d "${EVIDENCE_DIR}" ] && cp "${LOCAL_EVIDENCE}"/* "${EVIDENCE_DIR}/" 2>/dev/null; then
-  :
+# If explicitly requested via --update-evidence, copy into repository evidence dir
+if [[ "${*:-}" =~ "--update-evidence" ]] && [ -d "${EVIDENCE_DIR}" ]; then
+  cp "${LOCAL_EVIDENCE}"/* "${EVIDENCE_DIR}/" 2>/dev/null || true
 fi
 
 if [ -f "${LOCAL_EVIDENCE}/EVIDENCE_INTENT.json" ] && [ -f "${LOCAL_EVIDENCE}/MANIFEST.sha256" ]; then
