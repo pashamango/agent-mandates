@@ -1,0 +1,44 @@
+{
+  "ticket": "MIN-147",
+  "title": "MIN-116 [BUILD] Flash settlement: x402 micropayment + badge",
+  "run_id": "run-1126b2523b0d",
+  "builder": "agy@wolfram",
+  "qa_reviewer": "Codex",
+  "date": "2026-10-23",
+  "status": "READY_FOR_INDEPENDENT_QA",
+  "repo_url": "https://github.com/pashamango/agent-mandates.git",
+  "repo_mirror": "https://github.com/pashamango/hackt-com.git",
+  "branch": "minutta/min-147-min-116-build-flash-settlement-x402-micropayment-badge",
+  "simulation": true,
+  "crypto_scheme": "TESTNET_SIMULATED_HMAC_SHA256",
+  "acceptance_gates": {
+    "G1_x402_flow": {
+      "status": "PASS",
+      "evidence_file": "evidence/G1_X402_FLOW.json",
+      "currency": "GRACE"
+    },
+    "G2_matchmaker_badge": {
+      "status": "PASS",
+      "evidence_file": "evidence/G2_BADGE_VERIFICATION.json",
+      "independent_verification": "PASS",
+      "tamper_detection": "PASS"
+    },
+    "G3_budget_guard": {
+      "status": "PASS",
+      "evidence_file": "evidence/G3_BUDGET_GUARD.json",
+      "per_task_cap_enforced": true,
+      "weekly_cap_enforced": true,
+      "kill_switch_proven": true,
+      "ledger_persistence": true
+    },
+    "G4_evidence_bundle": {
+      "status": "PASS",
+      "manifest_file": "evidence/MANIFEST.sha256",
+      "test_log": "evidence/test_run.log",
+      "tests_passed": 11,
+      "tests_failed": 0
+    }
+  },
+  "commit_sha": "e0b482e9c093e7bc2e906b4ed815ab11a49a5056",
+  "tree_sha": "07c575d4d15bf526216ebff0906a17a7bd643a3d"
+}

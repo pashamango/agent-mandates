@@ -1,0 +1,67 @@
+{
+  "acceptance_gate": "G2",
+  "description": "Reputation Badge Issuance & Independent Verification",
+  "simulation": true,
+  "crypto_scheme": "TESTNET_SIMULATED_HMAC_SHA256",
+  "issued_badge": {
+    "badge_version": "1.0.0",
+    "badge_id": "badge-d54e1d3b38c8441d",
+    "deal_id": "flash-deal-2026-9021",
+    "settlement_id": "stl-018d84124d7d48f6",
+    "recipient": "did:key:z6MknGc3ocHs3zgjJvfKBSF35K43AYM822554dooPWBZg308",
+    "badge_type": "FLASH_SETTLEMENT_MATCHMAKER",
+    "tier": "PLATINUM",
+    "reputation_score": 150,
+    "settlement_amount": 25.0,
+    "currency": "GRACE",
+    "issued_at": 1792757098,
+    "expires_at": 1795349098,
+    "issuer": "urn:mindrock:authority:hack-temple",
+    "issuer_key_id": "key-hack-temple-testnet-01",
+    "simulation": true,
+    "crypto_scheme": "TESTNET_SIMULATED_HMAC_SHA256",
+    "simulation_notice": "[SIMULATION NOTICE] Flash Settlement Prototype running in TESTNET SIMULATION mode (HMAC-SHA256). No real funds or real private keys used.",
+    "signature": "4738f2ba9dad7303467f010845cd1cb9da0ccec955ecce2c03463e762ea2f559"
+  },
+  "independent_verification_valid": {
+    "verified": true,
+    "status": "VALID",
+    "badge_id": "badge-d54e1d3b38c8441d",
+    "recipient": "did:key:z6MknGc3ocHs3zgjJvfKBSF35K43AYM822554dooPWBZg308",
+    "tier": "PLATINUM",
+    "reputation_score": 150,
+    "currency": "GRACE",
+    "expires_at": 1795349098,
+    "time_until_expiration_seconds": 2591999,
+    "simulation": true,
+    "crypto_scheme": "TESTNET_SIMULATED_HMAC_SHA256"
+  },
+  "tamper_detection_test": {
+    "tampered_payload": {
+      "badge_version": "1.0.0",
+      "badge_id": "badge-d54e1d3b38c8441d",
+      "deal_id": "flash-deal-2026-9021",
+      "settlement_id": "stl-018d84124d7d48f6",
+      "recipient": "did:key:z6MknGc3ocHs3zgjJvfKBSF35K43AYM822554dooPWBZg308",
+      "badge_type": "FLASH_SETTLEMENT_MATCHMAKER",
+      "tier": "PLATINUM",
+      "reputation_score": 9999,
+      "settlement_amount": 25.0,
+      "currency": "GRACE",
+      "issued_at": 1792757098,
+      "expires_at": 1795349098,
+      "issuer": "urn:mindrock:authority:hack-temple",
+      "issuer_key_id": "key-hack-temple-testnet-01",
+      "simulation": true,
+      "crypto_scheme": "TESTNET_SIMULATED_HMAC_SHA256",
+      "simulation_notice": "[SIMULATION NOTICE] Flash Settlement Prototype running in TESTNET SIMULATION mode (HMAC-SHA256). No real funds or real private keys used.",
+      "signature": "4738f2ba9dad7303467f010845cd1cb9da0ccec955ecce2c03463e762ea2f559"
+    },
+    "verification_result": {
+      "verified": false,
+      "status": "INVALID",
+      "error": "BADGE_SIGNATURE_MISMATCH",
+      "simulation": true
+    }
+  }
+}

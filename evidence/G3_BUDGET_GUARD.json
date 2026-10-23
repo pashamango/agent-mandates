@@ -1,0 +1,59 @@
+{
+  "acceptance_gate": "G3",
+  "description": "Codex Budget Guard: Per-Task Cap, Weekly Kill-Switch, and Persistent Ledger",
+  "simulation": true,
+  "guard_configuration": {
+    "per_task_cap": 100.0,
+    "weekly_cap": 500.0,
+    "currency": "GRACE"
+  },
+  "rejection_test_per_task_cap": {
+    "attempted_amount": 150.0,
+    "cap": 100.0,
+    "result": {
+      "status": "REJECTED_BUDGET_GUARD",
+      "allowed": false,
+      "reason": "PER_TASK_CAP_EXCEEDED",
+      "guard_info": {
+        "allowed": false,
+        "reason": "PER_TASK_CAP_EXCEEDED",
+        "amount": 150.0,
+        "per_task_cap": 100.0,
+        "currency": "GRACE",
+        "simulation": true
+      },
+      "simulation": true,
+      "crypto_scheme": "TESTNET_SIMULATED_HMAC_SHA256"
+    }
+  },
+  "rejection_test_kill_switch": {
+    "attempted_amount": 10.0,
+    "kill_switch_active": true,
+    "result": {
+      "status": "REJECTED_BUDGET_GUARD",
+      "allowed": false,
+      "reason": "KILL_SWITCH_ACTIVE",
+      "guard_info": {
+        "allowed": false,
+        "reason": "KILL_SWITCH_ACTIVE",
+        "kill_switch": true,
+        "amount": 10.0,
+        "currency": "GRACE",
+        "simulation": true
+      },
+      "simulation": true,
+      "crypto_scheme": "TESTNET_SIMULATED_HMAC_SHA256"
+    }
+  },
+  "audit_ledger_summary": {
+    "simulation": true,
+    "kill_switch_active": false,
+    "per_task_cap": 100.0,
+    "weekly_cap": 500.0,
+    "weekly_spent": 25.0,
+    "total_transactions": 3,
+    "approved_count": 1,
+    "rejected_count": 2,
+    "total_settled_amount": 25.0
+  }
+}
