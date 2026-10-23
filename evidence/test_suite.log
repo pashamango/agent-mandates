@@ -1,0 +1,17 @@
+test_dns_dmarc_quarantine_policy (min137.test_migration.TestMigrationVerification.test_dns_dmarc_quarantine_policy)
+Ensure DMARC policy enforces quarantine and proper rua/ruf destinations. ... ok
+test_dns_spf_strict_hard_fail (min137.test_migration.TestMigrationVerification.test_dns_spf_strict_hard_fail)
+Ensure SPF policy uses Google Workspace include and strict -all hard fail. ... ok
+test_full_audit_passes (min137.test_migration.TestMigrationVerification.test_full_audit_passes)
+Run full programmatic audit and verify overall pass. ... ok
+test_governance_agents_md_clean (min137.test_migration.TestMigrationVerification.test_governance_agents_md_clean)
+Ensure AGENTS.md does not contain any vestor.in references. ... ok
+test_inventory_completeness (min137.test_migration.TestMigrationVerification.test_inventory_completeness)
+Validate the inventory matrix for services and identity bindings. ... ok
+test_report_and_runbook_existence (min137.test_migration.TestMigrationVerification.test_report_and_runbook_existence)
+Ensure migration audit report and Darwin runbook exist and cover all requirements. ... ok
+
+----------------------------------------------------------------------
+Ran 6 tests in 0.001s
+
+OK

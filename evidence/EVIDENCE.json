@@ -1,0 +1,33 @@
+{
+  "ticket": "MIN-137",
+  "title": "[CRITICAL] Migration vestor.in to mindrock.capital",
+  "authority": "Pavel Cherkashin <pavel@mindrock.capital>",
+  "builder": "agy@wolfram",
+  "timestamp": "2026-10-23T12:58:00Z",
+  "git": {
+    "repo_url": "https://github.com/pashamango/agent-mandates.git",
+    "mirror_url": "https://github.com/pashamango/hackt-com.git",
+    "branch": "minutta/min-137-critical-migration-vestorin-to-mindrockcapital"
+  },
+  "audit_results": {
+    "agents_md_purged": true,
+    "active_references_deprecated_domain": 0,
+    "inventory_services_tracked": 12,
+    "inventory_all_verified": true,
+    "dns_spf_enforced": "v=spf1 include:_spf.google.com -all",
+    "dns_dmarc_enforced": "v=DMARC1; p=quarantine; rua=mailto:71e800db705f4c72956d4be4975e58f9@dmarc-reports.cloudflare.net,mailto:dmarc@mindrock.capital; ruf=mailto:dmarc@mindrock.capital; fo=1;",
+    "unit_tests_passed": 6,
+    "unit_tests_failed": 0
+  },
+  "deliverables": [
+    "AGENTS.md",
+    "README.md",
+    "min137/README.md",
+    "min137/report/MIN-137-migration-report.md",
+    "min137/migration_verifier.py",
+    "min137/test_migration.py",
+    "tests/test_min137_migration.py",
+    "evidence/test_suite.log",
+    "evidence/EVIDENCE.json"
+  ]
+}
