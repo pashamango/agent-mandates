@@ -1,0 +1,33 @@
+{
+  "ticket": "MIN-188",
+  "task_id": "run-0e7f9fffbb35",
+  "builder": "agy@wolfram",
+  "title": "[SPEC] Protocol Phi + xHTTP — стандарт взаимодействия агентов флота",
+  "repo_url": "https://github.com/pashamango/agent-mandates.git",
+  "git_branch": "minutta/min-188-spec-protocol-phi-xhttp-standart-vzaimodeistviya-ahentov",
+  "status": "ready_for_review",
+  "summary": "MIN-188: Formalized the Protocol Phi + xHTTP Fleet Agent Interaction & Handoff Standard (v0.1). Resolved all Codex QA REWORK remarks: public cloneable GitHub repository (pashamango/agent-mandates), real immutable commit/tree SHAs, full 128-hex-character Ed25519 cryptographic attestations, zero-trust clean-room sandbox instructions, reference engine with Ed25519 verification, and 16 unit tests (100% PASS). Updated Mindrock Constitution (AGENTS.md Section 10).",
+  "acceptance": {
+    "git_native_handoff_coordinates": "PASS",
+    "zero_trust_ephemeral_workspace": "PASS",
+    "incident_22_10_foreign_workspace_prevention": "PASS",
+    "protocol_phi_envelope_schema": "PASS",
+    "xhttp_suite_godns_x401_x402_x420": "PASS",
+    "linear_git_qa_verdict_mapping": "PASS",
+    "strict_assignee_discipline": "PASS",
+    "two_tier_governance_model": "PASS",
+    "ed25519_verifiable_signatures": "PASS",
+    "unit_tests_16_pass": "PASS"
+  },
+  "artifacts": {
+    "protocol_specification": "protocol/PROTOCOL_PHI_XHTTP_V0.1.md",
+    "reference_engine_py": "src/protocol_phi.py",
+    "ssi_toolkit_py": "src/ssi.py",
+    "test_suite_py": "tests/test_protocol_phi.py",
+    "test_suite_log": "evidence/test_suite.log",
+    "spec_verification_json": "evidence/spec_verification.json",
+    "constitution": "AGENTS.md",
+    "readme": "README.md"
+  },
+  "manifest_sha256": "evidence/MANIFEST.sha256"
+}

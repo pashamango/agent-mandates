@@ -1,0 +1,21 @@
+test_envelope_creation_and_validation (test_protocol_phi.TestProtocolPhiEngine.test_envelope_creation_and_validation) ... ok
+test_envelope_real_ed25519_signing_and_verification (test_protocol_phi.TestProtocolPhiEngine.test_envelope_real_ed25519_signing_and_verification) ... ok
+test_envelope_rejects_self_handoff (test_protocol_phi.TestProtocolPhiEngine.test_envelope_rejects_self_handoff) ... ok
+test_envelope_rejects_truncated_signature (test_protocol_phi.TestProtocolPhiEngine.test_envelope_rejects_truncated_signature) ... ok
+test_git_coordinates_reject_invalid_sha (test_protocol_phi.TestProtocolPhiEngine.test_git_coordinates_reject_invalid_sha) ... ok
+test_git_coordinates_reject_local_path (test_protocol_phi.TestProtocolPhiEngine.test_git_coordinates_reject_local_path) ... ok
+test_git_coordinates_validation_success (test_protocol_phi.TestProtocolPhiEngine.test_git_coordinates_validation_success) ... ok
+test_peer_review_boundary_enforcement (test_protocol_phi.TestProtocolPhiEngine.test_peer_review_boundary_enforcement) ... ok
+test_receipt_creation_and_parsing_roundtrip (test_protocol_phi.TestProtocolPhiEngine.test_receipt_creation_and_parsing_roundtrip) ... ok
+test_sealed_comment_markdown_roundtrip (test_protocol_phi.TestProtocolPhiEngine.test_sealed_comment_markdown_roundtrip) ... ok
+test_two_tier_governance_project_gate_escalates_to_pavel (test_protocol_phi.TestProtocolPhiEngine.test_two_tier_governance_project_gate_escalates_to_pavel) ... ok
+test_two_tier_governance_rework_returns_to_builder (test_protocol_phi.TestProtocolPhiEngine.test_two_tier_governance_rework_returns_to_builder) ... ok
+test_two_tier_governance_sub_issue_autonomous_done (test_protocol_phi.TestProtocolPhiEngine.test_two_tier_governance_sub_issue_autonomous_done) ... ok
+test_workspace_contamination_detector_catches_incident_22_10 (test_protocol_phi.TestProtocolPhiEngine.test_workspace_contamination_detector_catches_incident_22_10) ... ok
+test_workspace_isolation_clean_match (test_protocol_phi.TestProtocolPhiEngine.test_workspace_isolation_clean_match) ... ok
+test_workspace_isolation_detects_commit_mismatch (test_protocol_phi.TestProtocolPhiEngine.test_workspace_isolation_detects_commit_mismatch) ... ok
+
+----------------------------------------------------------------------
+Ran 16 tests in 0.007s
+
+OK

@@ -1,0 +1,40 @@
+{
+  "ticket_id": "MIN-188",
+  "title": "[SPEC] Protocol Phi + xHTTP — стандарт взаимодействия агентов флота",
+  "run_id": "run-0e7f9fffbb35",
+  "builder": "agy@wolfram",
+  "verification_timestamp": "2026-10-23T06:40:00Z",
+  "repo_url": "https://github.com/pashamango/agent-mandates.git",
+  "branch": "minutta/min-188-spec-protocol-phi-xhttp-standart-vzaimodeistviya-ahentov",
+  "criteria_matrix": {
+    "1_git_native_handoff_spec": {
+      "status": "PASS",
+      "rule": "Every handoff strictly via immutable git coordinates (repo_url, branch, commit_sha, tree_sha, manifest_sha256).",
+      "zero_trust_env": "Receiving side spins up clean ephemeral sandbox from scratch; foreign or ambient workspace reuse forbidden.",
+      "incident_22_10_prevention": "Explicit check: mismatch in remote origin or commit SHA triggers WORKSPACE_CONTAMINATED abort."
+    },
+    "2_protocol_phi_and_xhttp_suite": {
+      "status": "PASS",
+      "protocol_phi_version": "phi-0.1 (Hello-World Φ-0.1 approved 2026-10-21)",
+      "identity_and_mandates": "DKIM for agents via goDNS / DNS TXT trust anchor (_mandate.<agent>.hackt.com) + Ed25519 hackt-mandate.",
+      "x401_multipass": "Mutual challenge/response authentication handshake with cryptographic proof-of-possession.",
+      "x402_budget_guard": "Enforcement of wall-clock limit (90m) and weekly task cap (50) to prevent token drain.",
+      "x420_backpressure": "Patience envelope for queue ETA, slot saturation, and FSCK_OFF backpressure handling.",
+      "receipts_standard": "Machine-readable sealed JSON envelopes in comments (<!-- phi-receipt:... -->) instead of ad-hoc markdown."
+    },
+    "3_linear_git_and_qa_verdicts_mapping": {
+      "status": "PASS",
+      "linear_issue_mapping": "Issue ID -> correlation_id; state machine transitions mapped to protocol intents.",
+      "git_branch_mapping": "gitBranchName strictly bound to handoff git.branch.",
+      "qa_verdict_mapping": "Signed QA receipts (PASS / REWORK) with exact checks matrix and hash proofs.",
+      "strict_assignee_discipline": "No unassigned active tasks ('Мяч всегда в руках').",
+      "two_tier_governance": "Sub-issues autonomously merged/Done by QA; Project Release gates escalated to Pavel Cherkashin in 1-tap."
+    }
+  },
+  "test_results": {
+    "total_tests": 16,
+    "passed": 16,
+    "failed": 0,
+    "coverage": "GitCoordinates, ProtocolPhiEnvelope, ProtocolPhiReceipt, WorkspaceContaminationDetector, PeerReviewBoundary, TwoTierGovernance, Ed25519SignatureVerification, TruncatedSignatureRejection"
+  }
+}
