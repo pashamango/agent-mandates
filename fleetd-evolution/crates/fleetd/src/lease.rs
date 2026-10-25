@@ -125,13 +125,14 @@ impl DurableLeaseManager {
         Ok(())
     }
 
-    pub fn acquire_lease(
+    pub fn acquire_lease_atomic(
         &self,
         task_id: &str,
         slot: &str,
         ttl_secs: u64,
         commit_sha: Option<&str>,
-    ) -> Result<bool, String> {
+        max_fallback_cap: Option<usize>,
+    ) -> Result<Result<(), String>, String> {
         let lock = self.acquire_file_lock()?;
         let res = (|| {
             let mut leases = self.read_leases_locked()?;
@@ -139,7 +140,19 @@ impl DurableLeaseManager {
 
             if let Some(existing) = leases.get(task_id) {
                 if !existing.is_expired(now) {
-                    return Ok(false); // Already claimed
+                    return Ok(Err("DOUBLE_CLAIM_REJECTED".to_string()));
+                }
+            }
+
+            if slot == "codex-local" {
+                if let Some(cap) = max_fallback_cap {
+                    let active_fallback = leases
+                        .values()
+                        .filter(|r| r.slot == "codex-local" && !r.is_expired(now) && r.task_id != task_id)
+                        .count();
+                    if active_fallback >= cap {
+                        return Ok(Err("FALLBACK_CAP_EXCEEDED".to_string()));
+                    }
                 }
             }
 
@@ -155,10 +168,23 @@ impl DurableLeaseManager {
             );
 
             self.write_leases_locked(&leases)?;
-            Ok(true)
+            Ok(Ok(()))
         })();
         self.release_file_lock(lock);
         res
+    }
+
+    pub fn acquire_lease(
+        &self,
+        task_id: &str,
+        slot: &str,
+        ttl_secs: u64,
+        commit_sha: Option<&str>,
+    ) -> Result<bool, String> {
+        match self.acquire_lease_atomic(task_id, slot, ttl_secs, commit_sha, None)? {
+            Ok(()) => Ok(true),
+            Err(_) => Ok(false),
+        }
     }
 
     pub fn release_lease(&self, task_id: &str) -> Result<(), String> {

@@ -264,6 +264,18 @@ impl LinearClient {
                   identifier
                   title
                   description
+                  createdAt
+                  updatedAt
+                  project {
+                    name
+                  }
+                  state {
+                    name
+                    type
+                  }
+                  assignee {
+                    name
+                  }
                   labels {
                     nodes {
                       name
@@ -295,6 +307,12 @@ impl LinearClient {
             let identifier = node.get("identifier").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let title = node.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let description = node.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let created_at = node.get("createdAt").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let updated_at = node.get("updatedAt").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let project_name = node.pointer("/project/name").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let state_name = node.pointer("/state/name").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let state_type = node.pointer("/state/type").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let assignee_name = node.pointer("/assignee/name").and_then(|v| v.as_str()).map(|s| s.to_string());
 
             let mut labels = Vec::new();
             if let Some(lbl_nodes) = node.pointer("/labels/nodes").and_then(|l| l.as_array()) {
@@ -311,11 +329,45 @@ impl LinearClient {
                 title,
                 description,
                 labels,
+                project_name,
+                state_name,
+                state_type,
+                assignee_name,
+                created_at,
+                updated_at,
             });
         }
 
         Ok(candidates)
     }
+}
+
+pub fn parse_timestamp_secs(s: &str) -> Option<u64> {
+    let trimmed = s.trim();
+    if trimmed.len() < 19 {
+        return None;
+    }
+    let year: u64 = trimmed[0..4].parse().ok()?;
+    let month: u64 = trimmed[5..7].parse().ok()?;
+    let day: u64 = trimmed[8..10].parse().ok()?;
+    let hour: u64 = trimmed[11..13].parse().ok()?;
+    let min: u64 = trimmed[14..16].parse().ok()?;
+    let sec: u64 = trimmed[17..19].parse().ok()?;
+
+    if month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || min > 59 || sec > 59 {
+        return None;
+    }
+
+    let days_before_month = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+    let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+    let mut total_days = (year - 1970) * 365 + (year - 1969) / 4 - (year - 1901) / 100 + (year - 1601) / 400;
+    total_days += days_before_month[(month - 1) as usize];
+    if is_leap && month > 2 {
+        total_days += 1;
+    }
+    total_days += day - 1;
+
+    Some(total_days * 86400 + hour * 3600 + min * 60 + sec)
 }
 
 #[derive(Clone, Debug)]
@@ -325,4 +377,10 @@ pub struct LinearIssueCandidate {
     pub title: String,
     pub description: String,
     pub labels: Vec<String>,
+    pub project_name: Option<String>,
+    pub state_name: Option<String>,
+    pub state_type: Option<String>,
+    pub assignee_name: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
 }

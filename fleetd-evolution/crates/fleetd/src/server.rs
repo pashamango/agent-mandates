@@ -8,8 +8,11 @@ use sha2::Sha256;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 
+use std::sync::Arc;
 use crate::config::Config;
 use crate::db::Database;
+use crate::linear::LinearClient;
+use crate::router::SmartRouter;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -17,6 +20,8 @@ type HmacSha256 = Hmac<Sha256>;
 pub struct AppState {
     pub config: Config,
     pub db: Database,
+    pub router: Arc<SmartRouter>,
+    pub linear: Option<Arc<LinearClient>>,
 }
 
 pub fn create_router(state: AppState) -> Router {
@@ -36,6 +41,15 @@ async fn webhook_handler(
     headers: HeaderMap,
     body_bytes: axum::body::Bytes,
 ) -> impl IntoResponse {
+    let (status, body) = handle_webhook(state, headers, body_bytes).await;
+    (status, Json(body)).into_response()
+}
+
+pub async fn handle_webhook(
+    state: AppState,
+    headers: HeaderMap,
+    body_bytes: axum::body::Bytes,
+) -> (StatusCode, serde_json::Value) {
     // 1. Signature Verification
     if let Some(secret) = &state.config.linear_webhook_secret {
         let sig_opt = headers.get("Linear-Signature").and_then(|v| v.to_str().ok());
@@ -46,11 +60,11 @@ async fn webhook_handler(
 
             if sig.to_lowercase() != expected.to_lowercase() {
                 warn!("Invalid webhook signature");
-                return (StatusCode::UNAUTHORIZED, "Invalid signature").into_response();
+                return (StatusCode::UNAUTHORIZED, serde_json::json!({ "error": "Invalid signature" }));
             }
         } else {
             warn!("Missing Linear-Signature header");
-            return (StatusCode::UNAUTHORIZED, "Missing signature").into_response();
+            return (StatusCode::UNAUTHORIZED, serde_json::json!({ "error": "Missing signature" }));
         }
     }
 
@@ -59,7 +73,7 @@ async fn webhook_handler(
         Ok(p) => p,
         Err(e) => {
             warn!("Invalid JSON payload: {}", e);
-            return (StatusCode::BAD_REQUEST, "Invalid JSON").into_response();
+            return (StatusCode::BAD_REQUEST, serde_json::json!({ "error": "Invalid JSON" }));
         }
     };
 
@@ -72,7 +86,7 @@ async fn webhook_handler(
         let age_secs = (now_ms - ts).abs() / 1000.0;
         if age_secs > 300.0 {
             warn!("Rejected stale webhook (age: {:.1}s)", age_secs);
-            return (StatusCode::UNAUTHORIZED, "Stale webhook").into_response();
+            return (StatusCode::UNAUTHORIZED, serde_json::json!({ "error": "Stale webhook" }));
         }
     }
 
@@ -94,7 +108,7 @@ async fn webhook_handler(
     let accepted = state.db.record_inbox(delivery_id, event_type, action, issue_id, &raw_str, "accepted");
     if !accepted {
         info!("Duplicate delivery {} ignored", delivery_id);
-        return (StatusCode::OK, Json(serde_json::json!({ "status": "duplicate_ignored" }))).into_response();
+        return (StatusCode::OK, serde_json::json!({ "status": "duplicate_ignored" }));
     }
 
     // 4. Evaluate Event
@@ -102,7 +116,7 @@ async fn webhook_handler(
 
     if !should_enqueue || issue_info.is_none() {
         info!("Event ignored by filter (type={}, action={})", event_type, action);
-        return (StatusCode::OK, Json(serde_json::json!({ "status": "ignored" }))).into_response();
+        return (StatusCode::OK, serde_json::json!({ "status": "ignored" }));
     }
 
     let info = issue_info.unwrap();
@@ -110,30 +124,108 @@ async fn webhook_handler(
     // Prevent duplicate concurrent execution for the same issue
     if state.db.is_issue_already_enqueued(&info.id) {
         info!("Issue {} already has active or pending job, ignoring duplicate webhook", info.identifier);
-        return (StatusCode::OK, Json(serde_json::json!({ "status": "already_queued" }))).into_response();
+        return (StatusCode::OK, serde_json::json!({ "status": "already_queued" }));
     }
 
-    // 5. Enqueue Job
-    match state.db.enqueue_job(
-        delivery_id,
-        &info.id,
-        &info.identifier,
-        &info.title,
-        &info.description,
-        &cmd_type,
-        &builder,
-    ) {
-        Ok(run_id) => {
-            info!("Enqueued job {} for builder {} (cmd={}, run_id={})", info.identifier, builder, cmd_type, run_id);
-            (
+    // 5. Smart Router & Canonical Gate Enforcement (§3, §4, §5, §6)
+    if cmd_type != "CANCEL" {
+        state.router.refresh_pilot_gate("fleetd-evolution/evidence/PILOT_MIN_221_RECEIPT.json");
+        state.router.refresh_slot_health(&state.config.codex_bin);
+        state.router.refresh_quota_signals("fleetd-evolution/data/quota_signals.json");
+
+        let handoff_commit = crate::router::resolve_handoff_commit(None, &info.description);
+        let resolved_project = info.project.clone().or_else(|| {
+            crate::canonical::extract_project_from_text(&format!("{}\n{}", info.title, info.description))
+        });
+
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let wait_time_secs = info.created_at.as_deref()
+            .and_then(crate::linear::parse_timestamp_secs)
+            .map(|c| now_secs.saturating_sub(c))
+            .unwrap_or(0);
+
+        let task_cand = crate::router::TaskCandidate {
+            id: info.id.clone(),
+            title: info.title.clone(),
+            description: info.description.clone(),
+            project: resolved_project,
+            tier: None,
+            status: info.status.clone().or_else(|| Some("Todo".to_string())),
+            assignee: info.assignee.clone(),
+            wait_time_secs,
+        };
+
+        let decision = state.router.route_and_claim_task(&task_cand, 3600, false, handoff_commit.as_deref());
+        if !decision.success {
+            info!("Webhook rejected task {} via vNext: {}", info.identifier, decision.reason);
+            if let Some(rework_msg) = &decision.rework_comment {
+                if let Some(linear) = &state.linear {
+                    let _ = linear.post_comment(&info.id, rework_msg).await;
+                }
+            }
+            return (
                 StatusCode::OK,
-                Json(serde_json::json!({ "status": "queued", "builder": builder, "run_id": run_id })),
-            )
-                .into_response()
+                serde_json::json!({
+                    "status": "rejected",
+                    "reason": decision.reason,
+                    "rework_comment": decision.rework_comment,
+                }),
+            );
         }
-        Err(e) => {
-            warn!("Failed to enqueue job: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response()
+
+        let routed_builder = decision.slot.unwrap_or(builder);
+        let chosen_slot = if routed_builder == "codex-local" { "codex" } else { "agy" };
+
+        match state.db.enqueue_job(
+            delivery_id,
+            &info.id,
+            &info.identifier,
+            &info.title,
+            &info.description,
+            &cmd_type,
+            chosen_slot,
+        ) {
+            Ok(run_id) => {
+                info!("Enqueued job {} for builder {} (cmd={}, run_id={}, commit={:?})", info.identifier, chosen_slot, cmd_type, run_id, handoff_commit);
+                (
+                    StatusCode::OK,
+                    serde_json::json!({
+                        "status": "queued",
+                        "builder": chosen_slot,
+                        "run_id": run_id,
+                        "commit_sha": handoff_commit,
+                    }),
+                )
+            }
+            Err(e) => {
+                warn!("Failed to enqueue job: {}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, serde_json::json!({ "error": "Database error" }))
+            }
+        }
+    } else {
+        match state.db.enqueue_job(
+            delivery_id,
+            &info.id,
+            &info.identifier,
+            &info.title,
+            &info.description,
+            &cmd_type,
+            &builder,
+        ) {
+            Ok(run_id) => {
+                info!("Enqueued cancel job {} for builder {} (run_id={})", info.identifier, builder, run_id);
+                (
+                    StatusCode::OK,
+                    serde_json::json!({ "status": "queued", "builder": builder, "run_id": run_id }),
+                )
+            }
+            Err(e) => {
+                warn!("Failed to enqueue cancel job: {}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, serde_json::json!({ "error": "Database error" }))
+            }
         }
     }
 }
@@ -143,6 +235,10 @@ pub struct IssueInfo {
     pub identifier: String,
     pub title: String,
     pub description: String,
+    pub project: Option<String>,
+    pub status: Option<String>,
+    pub assignee: Option<String>,
+    pub created_at: Option<String>,
 }
 
 fn evaluate_event(
@@ -203,6 +299,17 @@ fn evaluate_event(
             builder_choice = "any";
         }
 
+        let project = data.pointer("/project/name").and_then(|v| v.as_str())
+            .or_else(|| data.get("projectName").and_then(|v| v.as_str()))
+            .map(|s| s.to_string());
+        let status = data.pointer("/state/name").and_then(|v| v.as_str())
+            .or_else(|| data.get("stateName").and_then(|v| v.as_str()))
+            .map(|s| s.to_string());
+        let assignee = data.pointer("/assignee/name").and_then(|v| v.as_str())
+            .or_else(|| data.get("assigneeName").and_then(|v| v.as_str()))
+            .map(|s| s.to_string());
+        let created_at = data.get("createdAt").and_then(|v| v.as_str()).map(|s| s.to_string());
+
         if !builder_choice.is_empty() {
             if action == "create" {
                 return (
@@ -214,6 +321,10 @@ fn evaluate_event(
                         identifier: data.get("identifier").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                         title: data.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                         description: data.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        project,
+                        status,
+                        assignee,
+                        created_at,
                     }),
                 );
             }
@@ -232,6 +343,10 @@ fn evaluate_event(
                             identifier: data.get("identifier").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                             title: data.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                             description: data.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                            project,
+                            status,
+                            assignee,
+                            created_at,
                         }),
                     );
                 }
@@ -276,6 +391,18 @@ fn evaluate_event(
                         .unwrap_or(&issue_id)
                         .to_string();
 
+                    let issue_obj = data.get("issue");
+                    let project = issue_obj.and_then(|i| i.pointer("/project/name")).and_then(|v| v.as_str())
+                        .or_else(|| issue_obj.and_then(|i| i.get("projectName")).and_then(|v| v.as_str()))
+                        .map(|s| s.to_string());
+                    let status = issue_obj.and_then(|i| i.pointer("/state/name")).and_then(|v| v.as_str())
+                        .or_else(|| issue_obj.and_then(|i| i.get("stateName")).and_then(|v| v.as_str()))
+                        .map(|s| s.to_string());
+                    let assignee = issue_obj.and_then(|i| i.pointer("/assignee/name")).and_then(|v| v.as_str())
+                        .or_else(|| issue_obj.and_then(|i| i.get("assigneeName")).and_then(|v| v.as_str()))
+                        .map(|s| s.to_string());
+                    let created_at = issue_obj.and_then(|i| i.get("createdAt")).and_then(|v| v.as_str()).map(|s| s.to_string());
+
                     return (
                         true,
                         cmd,
@@ -285,6 +412,10 @@ fn evaluate_event(
                             identifier,
                             title: "(comment command)".to_string(),
                             description: format!("Instruction from comment:\n{}", body),
+                            project,
+                            status,
+                            assignee,
+                            created_at,
                         }),
                     );
                 }

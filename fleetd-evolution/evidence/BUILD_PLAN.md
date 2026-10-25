@@ -28,7 +28,7 @@
   - `fleetd-evolution/crates/fleetd/src/db.rs`: SQLite хранилище очереди задач, outbox и reconciliation
   - `fleetd-evolution/crates/fleetd/src/linear.rs`: Клиент GraphQL API Linear
   - `fleetd-evolution/crates/fleetd/src/server.rs`: Webhook-приёмник Linear
-  - `fleetd-evolution/crates/fleetd/tests/acceptance.rs`: Интеграционные acceptance-тесты на Rust, покрывающие все 9 критериев приемки MIN-229 через daemon path
+  - `fleetd-evolution/crates/fleetd/tests/acceptance.rs`: Интеграционные acceptance-тесты на Rust, покрывающие все 9 критериев приемки MIN-229 и проверку интеграции daemon hot path (10 интеграционных тестов)
 
 ---
 
@@ -52,7 +52,7 @@ cargo build --release --locked
 
 ### Контрольная сумма собранного бинарника release:
 ```text
-SHA256: 9d7dd8185264909e152f3f26cf90d8a413135d7c699a693567672d5e0ae2e740  fleetd
+SHA256: 03a0fb402b27fb7c898f6db0d9d8292376b7a7fe3dd86b8b800556df07363fe9  fleetd
 ```
 
 ---

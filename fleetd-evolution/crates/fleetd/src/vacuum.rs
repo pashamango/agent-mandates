@@ -1,16 +1,19 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 
-use crate::canonical::validate_canonical_rules;
+use crate::canonical::{extract_project_from_text, validate_canonical_rules};
 use crate::config::Config;
 use crate::db::Database;
-use crate::lease::DurableLeaseManager;
-use crate::ledger::RoutingLedger;
-use crate::linear::LinearClient;
-use crate::router::{SmartRouter, TaskCandidate};
+use crate::linear::{parse_timestamp_secs, LinearClient};
+use crate::router::{resolve_handoff_commit, SmartRouter, TaskCandidate};
 
-pub async fn run_vacuum_loop(config: Config, db: Database) {
+pub async fn run_vacuum_loop(
+    config: Config,
+    db: Database,
+    router: Arc<SmartRouter>,
+    linear: Arc<LinearClient>,
+) {
     if !config.vacuum_enabled {
         info!("Vacuum loop disabled by configuration");
         return;
@@ -21,17 +24,16 @@ pub async fn run_vacuum_loop(config: Config, db: Database) {
         config.vacuum_interval_secs, config.allowed_teams
     );
 
-    let linear = LinearClient::new(&config.linear_api_url, &config.linear_api_key);
-    let lease_manager = Arc::new(DurableLeaseManager::new("fleetd-evolution/data/active_leases.json"));
-    let ledger = Arc::new(RoutingLedger::new("fleetd-evolution/data/routing_ledger.jsonl"));
-    // Fail-closed default for pilot_passed (§6.3)
-    let router = SmartRouter::new(300, lease_manager, ledger, false);
-
     // Initial delay so fleetd settles on startup
     tokio::time::sleep(Duration::from_secs(10)).await;
 
     loop {
         tokio::time::sleep(Duration::from_secs(config.vacuum_interval_secs)).await;
+
+        // Dynamic health, pilot receipt, and quota signal refresh (§3.3, §3.4, §6)
+        router.refresh_pilot_gate("fleetd-evolution/evidence/PILOT_MIN_221_RECEIPT.json");
+        router.refresh_slot_health(&config.codex_bin);
+        router.refresh_quota_signals("fleetd-evolution/data/quota_signals.json");
 
         // Check if any slot is available
         let agy_active = db.has_active_job_for_builder("agy");
@@ -94,14 +96,40 @@ pub async fn run_vacuum_loop(config: Config, db: Database) {
                         continue;
                     }
 
-                    // 1. Canonical validation pre-check (§4)
+                    // 1. Resolve actual task attributes (§4, §3.3)
+                    let resolved_project = candidate.project_name.clone().or_else(|| {
+                        extract_project_from_text(&format!("{}\n{}", candidate.title, candidate.description))
+                    });
+
+                    let resolved_status = candidate.state_name.clone().or_else(|| {
+                        match candidate.state_type.as_deref() {
+                            Some("unstarted") => Some("Todo".to_string()),
+                            Some("backlog") => Some("Backlog".to_string()),
+                            _ => None,
+                        }
+                    });
+
+                    let now_secs = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+
+                    let wait_time_secs = candidate.created_at.as_deref()
+                        .and_then(parse_timestamp_secs)
+                        .map(|created| now_secs.saturating_sub(created))
+                        .unwrap_or(0);
+
+                    let resolved_assignee = candidate.assignee_name.clone();
+                    let handoff_commit = resolve_handoff_commit(None, &candidate.description);
+
+                    // Canonical validation pre-check (§4)
                     let verdict = validate_canonical_rules(
-                        None, // Project will be checked from candidate description or GraphQL
+                        resolved_project.as_deref(),
                         &candidate.title,
                         &candidate.description,
-                        Some("Todo"),
+                        resolved_status.as_deref(),
                         None,
-                        None,
+                        resolved_assignee.as_deref(),
                     );
 
                     if !verdict.passed {
@@ -117,14 +145,14 @@ pub async fn run_vacuum_loop(config: Config, db: Database) {
                         id: candidate.id.clone(),
                         title: candidate.title.clone(),
                         description: candidate.description.clone(),
-                        project: Some("Linear Project".to_string()),
+                        project: resolved_project,
                         tier: verdict.extracted_tier,
-                        status: Some("Todo".to_string()),
-                        assignee: None,
-                        wait_time_secs: 0,
+                        status: resolved_status,
+                        assignee: resolved_assignee,
+                        wait_time_secs,
                     };
 
-                    let decision = router.route_and_claim_task(&task_cand, 3600, false, None);
+                    let decision = router.route_and_claim_task(&task_cand, 3600, false, handoff_commit.as_deref());
                     if !decision.success {
                         info!("Vacuum router skipped {}: {}", candidate.identifier, decision.reason);
                         continue;

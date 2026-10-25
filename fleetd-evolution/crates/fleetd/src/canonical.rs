@@ -14,15 +14,17 @@ pub struct CanonicalVerdict {
     pub reason: String,
     pub rework_comment: Option<String>,
     pub extracted_tier: Option<String>,
+    pub extracted_project: Option<String>,
 }
 
 impl CanonicalVerdict {
-    pub fn pass(tier: &str) -> Self {
+    pub fn pass(tier: &str, project: Option<&str>) -> Self {
         Self {
             passed: true,
             reason: "CANONICAL_PASS".to_string(),
             rework_comment: None,
             extracted_tier: Some(tier.to_string()),
+            extracted_project: project.map(|s| s.to_string()),
         }
     }
 
@@ -32,8 +34,45 @@ impl CanonicalVerdict {
             reason: reason.to_string(),
             rework_comment: Some(comment.to_string()),
             extracted_tier: None,
+            extracted_project: None,
         }
     }
+}
+
+pub fn extract_project_from_text(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(pos) = trimmed.find("Project:") {
+            let after = trimmed[pos + 8..].trim();
+            if after.is_empty() {
+                continue;
+            }
+            if let Some(start_tag) = after.find('>') {
+                if let Some(end_tag) = after[start_tag + 1..].find("</project>") {
+                    let name = after[start_tag + 1..start_tag + 1 + end_tag].trim();
+                    if !name.is_empty() {
+                        return Some(name.to_string());
+                    }
+                }
+            }
+            let clean = after.trim_matches(|c: char| c == '*' || c == '`' || c == '[' || c == ']' || c == '"').trim();
+            if clean.is_empty() {
+                continue;
+            }
+            let name = clean.split('\n').next().unwrap_or("").trim();
+            let first_seg = if let Some(end_bold) = name.find("**") {
+                name[..end_bold].trim()
+            } else if let Some(dash) = name.find(" — ") {
+                name[..dash].trim()
+            } else {
+                name.trim()
+            };
+            if !first_seg.is_empty() {
+                return Some(first_seg.to_string());
+            }
+        }
+    }
+    None
 }
 
 pub fn extract_tier(text: &str) -> Option<String> {
@@ -85,18 +124,20 @@ pub fn validate_canonical_rules(
     }
 
     // 1. Mandatory Project check
-    match project {
-        Some(p) if !p.trim().is_empty() => {}
-        _ => {
-            return CanonicalVerdict::rework(
-                "MISSING_PROJECT",
-                "@PM REWORK: Задача не привязана к Linear Project. Привязка к проекту обязательна для выдачи билдеру.",
-            );
-        }
+    let combined_text = format!("{}\n{}", title, description);
+    let resolved_project: Option<String> = match project {
+        Some(p) if !p.trim().is_empty() => Some(p.trim().to_string()),
+        _ => extract_project_from_text(&combined_text),
+    };
+
+    if resolved_project.is_none() {
+        return CanonicalVerdict::rework(
+            "MISSING_PROJECT",
+            "@PM REWORK: Задача не привязана к Linear Project. Привязка к проекту обязательна для выдачи билдеру.",
+        );
     }
 
     // 2. Mandatory Tier check
-    let combined_text = format!("{}\n{}", title, description);
     let extracted = match extract_tier(&combined_text) {
         Some(t) => t,
         None => {
@@ -153,6 +194,7 @@ pub fn validate_canonical_rules(
             reason: "CODEX_CLOUD_LANE".to_string(),
             rework_comment: None,
             extracted_tier: Some(extracted),
+            extracted_project: resolved_project,
         };
     }
 
@@ -186,5 +228,5 @@ pub fn validate_canonical_rules(
         }
     }
 
-    CanonicalVerdict::pass(&extracted)
+    CanonicalVerdict::pass(&extracted, resolved_project.as_deref())
 }

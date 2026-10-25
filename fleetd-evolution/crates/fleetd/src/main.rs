@@ -53,17 +53,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         worker::run_outbox_loop(outbox_config, outbox_db).await;
     });
 
+    // Shared vNext SmartRouter, LeaseManager, Ledger, and LinearClient
+    let lease_manager = std::sync::Arc::new(fleetd::lease::DurableLeaseManager::new("fleetd-evolution/data/active_leases.json"));
+    let ledger = std::sync::Arc::new(fleetd::ledger::RoutingLedger::new("fleetd-evolution/data/routing_ledger.jsonl"));
+    let router = std::sync::Arc::new(fleetd::router::SmartRouter::new(300, lease_manager, ledger, false));
+    let linear = std::sync::Arc::new(fleetd::linear::LinearClient::new(&config.linear_api_url, &config.linear_api_key));
+
     // Spawn proactive backlog vacuum loop
     let vacuum_config = config.clone();
     let vacuum_db = db.clone();
+    let vacuum_router = router.clone();
+    let vacuum_linear = linear.clone();
     tokio::spawn(async move {
-        vacuum::run_vacuum_loop(vacuum_config, vacuum_db).await;
+        vacuum::run_vacuum_loop(vacuum_config, vacuum_db, vacuum_router, vacuum_linear).await;
     });
 
     // Start HTTP server
     let app_state = AppState {
         config: config.clone(),
         db: db.clone(),
+        router: router.clone(),
+        linear: Some(linear.clone()),
     };
     let app = create_router(app_state);
 

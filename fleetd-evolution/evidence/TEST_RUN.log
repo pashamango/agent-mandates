@@ -1,23 +1,35 @@
-test_acceptance_1_task_without_project (tests.test_fleetd_vnext.TestFleetdVNextAcceptance.test_acceptance_1_task_without_project)
-1. Задача без проекта → REWORK к PM, билдеру не выдана, в ledger — запись. ... ok
-test_acceptance_2_task_without_tier (tests.test_fleetd_vnext.TestFleetdVNextAcceptance.test_acceptance_2_task_without_tier)
-2. Задача без тира → REWORK к PM, билдеру не выдана. ... ok
-test_acceptance_3_task_mp_submitted_frozen_and_status_check (tests.test_fleetd_vnext.TestFleetdVNextAcceptance.test_acceptance_3_task_mp_submitted_frozen_and_status_check)
-3. Задача МП (поданная заявка) → билдеру не выдана. Задача в статусе Done, без статуса или с конфликтом тира также отклоняется. ... ok
-test_acceptance_4_fallback_triggers_time_and_quota (tests.test_fleetd_vnext.TestFleetdVNextAcceptance.test_acceptance_4_fallback_triggers_time_and_quota)
-4. Fallback-захват codex-local: а) по времени > 2ч в Todo; б) Backlog не триггерит fallback; в) по сигналу исчерпания квоты agy. ... ok
-test_acceptance_5_double_claim_simulation_and_durable_lease (tests.test_fleetd_vnext.TestFleetdVNextAcceptance.test_acceptance_5_double_claim_simulation_and_durable_lease)
-5. Симуляция двойного захвата → только один lease, межпроцессная защита, 2-й захват отклонён; повреждённый файл вызывает fail-closed. ... ok
-test_acceptance_6_quota_exhaustion_fail_closed (tests.test_fleetd_vnext.TestFleetdVNextAcceptance.test_acceptance_6_quota_exhaustion_fail_closed)
-6. Сигнал исчерпания квоты слота → захваты слота остановлены, нагрузка молча не перекинута; непройденный пилот блокирует fallback. ... ok
-test_acceptance_7_local_model_active_decision_and_timeout_fallback (tests.test_fleetd_vnext.TestFleetdVNextAcceptance.test_acceptance_7_local_model_active_decision_and_timeout_fallback)
-7. Модель активно определяет слот; при недоступности -> детерминированный fallback, инцидент в ledger. ... ok
-test_acceptance_8_historical_incident_metrics_and_rollback (tests.test_fleetd_vnext.TestFleetdVNextAcceptance.test_acceptance_8_historical_incident_metrics_and_rollback)
-8. Новая политика маршрутизации на исторических инцидентах даёт не хуже базовой, иначе rollback. ... ok
-test_acceptance_9_zero_trust_git_handoff_pilot_and_manifest (tests.test_fleetd_vnext.TestFleetdVNextAcceptance.test_acceptance_9_zero_trust_git_handoff_pilot_and_manifest)
-9. Zero-trust git handoff: clean-clone verify, fail-closed health check, pilot gate, manifest integrity. ... ok
+   Compiling fleetd v0.2.0 (/Users/pavelcherkashin/ChitAkasha-Wolfram/worktrees/MIN-229-FLEETD-VNEXT-0001/fleetd-evolution/crates/fleetd)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.03s
+     Running unittests src/lib.rs (/tmp/fleetd-target/debug/deps/fleetd-5a4098d55bbe6426)
 
-----------------------------------------------------------------------
-Ran 9 tests in 8.125s
+running 0 tests
 
-OK
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (/tmp/fleetd-target/debug/deps/fleetd-a5476d214b7662b3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/acceptance.rs (/tmp/fleetd-target/debug/deps/acceptance-e619f5b531649cfc)
+
+running 10 tests
+test test_rust_acceptance_2_task_without_tier ... ok
+test test_rust_acceptance_6_quota_exhaustion_and_pilot_fail_closed ... ok
+test test_rust_acceptance_1_task_without_project ... ok
+test test_rust_acceptance_3_submitted_frozen_and_status ... ok
+test test_rust_acceptance_5_double_claim_and_durable_lease ... ok
+test test_rust_acceptance_7_model_decision_and_deterministic_fallback ... ok
+test test_rust_acceptance_9_zero_trust_lease_and_gate_properties ... ok
+test test_rust_acceptance_4_fallback_triggers ... ok
+test test_rust_acceptance_8_historical_cases ... ok
+test test_rust_acceptance_10_daemon_integration_webhook_and_vacuum ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.59s
+
+   Doc-tests fleetd
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

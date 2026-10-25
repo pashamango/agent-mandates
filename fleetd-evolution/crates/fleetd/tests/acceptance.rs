@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::fs;
 
-use fleetd::canonical::validate_canonical_rules;
 use fleetd::lease::DurableLeaseManager;
 use fleetd::ledger::RoutingLedger;
 use fleetd::router::{SmartRouter, TaskCandidate};
@@ -264,49 +263,233 @@ fn test_rust_acceptance_7_model_decision_and_deterministic_fallback() {
 
 #[test]
 fn test_rust_acceptance_8_historical_cases() {
-    // MIN-124: Codex cloud lane with @Codex mention must not be claimed locally
-    let v_min124 = validate_canonical_rules(
-        Some("Research"),
-        "InsightCodex: Riemann null",
-        "Tier: ВС\nInsight investigation. @Codex handle this.",
-        Some("Todo"),
-        Some("ВС"),
-        Some("Codex"),
-    );
-    assert!(!v_min124.passed);
-    assert_eq!(v_min124.reason, "CODEX_CLOUD_LANE");
+    let (lease_mgr, ledger, _dir) = setup_env("acc8");
+    let router = SmartRouter::new(0, lease_mgr, ledger, true);
 
-    // MIN-173: Ambiguous builder marker
-    let v_min173 = validate_canonical_rules(
-        Some("Infrastructure"),
-        "Исследование dev-программ",
-        "Builder: codex-custom-unknown\nTier: ВП\nTask details.",
-        Some("Todo"),
-        Some("ВП"),
+    // 8a: Verify all 5 historical cases via evaluate_policy_metrics (§5.3, §8.8)
+    let evaluated_baseline = fleetd::router::evaluate_policy_metrics(&router, None, None);
+    assert_eq!(evaluated_baseline.double_claims, 0);
+    assert_eq!(evaluated_baseline.uncanonical_dispatched, 0);
+    assert_eq!(evaluated_baseline.missed_triggers, 0);
+    assert!(evaluated_baseline.on_time_ratio > 0.0);
+
+    // 8b: Test automated rollback on degrading candidate policy (§5.3)
+    let buggy_model = |_task: &TaskCandidate| -> Option<String> {
+        Some("agy".to_string())
+    };
+
+    // Strict baseline requires on_time_ratio = 1.0 (matching Python reference test)
+    let strict_baseline = fleetd::router::PolicyMetrics {
+        double_claims: 0,
+        missed_triggers: 0,
+        uncanonical_dispatched: 0,
+        on_time_ratio: 1.0,
+    };
+
+    router.set_slot_quota("agy", "QUOTA_EXHAUSTED_429");
+    let rollback_result = fleetd::router::evaluate_and_apply_policy_update(
+        &router,
+        &buggy_model,
+        Some(strict_baseline.clone()),
         None,
     );
-    assert!(!v_min173.passed);
-    assert_eq!(v_min173.reason, "AMBIGUOUS_BUILDER_MARKER");
 
-    // MIN-213: Submitted application frozen
-    let v_min213 = validate_canonical_rules(
-        Some("Поиск работы"),
-        "Cartesia Software Engineer",
-        "Builder: agy\nTier: МП\nStatus: submitted cv-ready awaiting-tap.",
-        Some("Todo"),
-        Some("МП"),
-        Some("МП"),
-    );
-    assert!(!v_min213.passed);
-    assert_eq!(v_min213.reason, "SUBMITTED_FROZEN");
+    assert_eq!(rollback_result.status, "ROLLED_BACK");
+    assert!(!rollback_result.policy_accepted);
+    assert!(rollback_result.candidate_metrics.on_time_ratio < strict_baseline.on_time_ratio);
 }
 
 #[test]
 fn test_rust_acceptance_9_zero_trust_lease_and_gate_properties() {
-    let (lease_mgr, _ledger, _dir) = setup_env("acc9");
-    // Verify commit SHA tracking in lease
+    let (lease_mgr, ledger, dir) = setup_env("acc9");
+    let router = SmartRouter::new(0, lease_mgr.clone(), ledger, false);
+
+    // 9a: Fail-closed health check of codex runner
+    router.refresh_slot_health("/nonexistent/bin/codex");
+    assert_eq!(
+        router.slot_health_status.lock().unwrap().get("codex-local").unwrap(),
+        "HEALTH_FAILED"
+    );
+
+    // 9b: Pilot receipt verification from real file (§6.3)
+    let receipt_path = if std::path::Path::new("fleetd-evolution/evidence/PILOT_MIN_221_RECEIPT.json").exists() {
+        "fleetd-evolution/evidence/PILOT_MIN_221_RECEIPT.json"
+    } else if std::path::Path::new("../../evidence/PILOT_MIN_221_RECEIPT.json").exists() {
+        "../../evidence/PILOT_MIN_221_RECEIPT.json"
+    } else {
+        "../../fleetd-evolution/evidence/PILOT_MIN_221_RECEIPT.json"
+    };
+    let (passed, reason) = fleetd::router::verify_pilot_receipt(receipt_path);
+    // Real MIN-221 receipt contains FAIL -> must fail closed
+    assert!(!passed);
+    assert!(reason.contains("FAIL"));
+
+    // Verify dynamic gate opening on simulated PASS receipt
+    let pass_receipt = format!("{}/pass_receipt.json", dir);
+    fs::write(
+        &pass_receipt,
+        serde_json::json!({
+            "pilot_task_id": "MIN-221",
+            "tier": "ВП",
+            "independent_qa_audit": {
+                "verdict": "PASS"
+            }
+        }).to_string(),
+    ).unwrap();
+    let (pass_ok, _) = fleetd::router::verify_pilot_receipt(&pass_receipt);
+    assert!(pass_ok);
+    router.refresh_pilot_gate(&pass_receipt);
+    assert!(router.is_pilot_passed());
+
+    // 9c: Commit SHA tracking in lease
     let ok = lease_mgr.acquire_lease("TASK-COMMIT", "agy", 3600, Some("deadbeef12345678901234567890123456789012")).unwrap();
     assert!(ok);
     let lease = lease_mgr.get_lease("TASK-COMMIT").unwrap().unwrap();
     assert_eq!(lease.commit_sha.as_deref(), Some("deadbeef12345678901234567890123456789012"));
+
+    // 9d: Manifest SHA256 integrity verification in Rust
+    let manifest_path = if std::path::Path::new("fleetd-evolution/evidence/MANIFEST.sha256").exists() {
+        "fleetd-evolution/evidence/MANIFEST.sha256"
+    } else if std::path::Path::new("../../evidence/MANIFEST.sha256").exists() {
+        "../../evidence/MANIFEST.sha256"
+    } else {
+        "../../fleetd-evolution/evidence/MANIFEST.sha256"
+    };
+    if std::path::Path::new(manifest_path).exists() {
+        let content = fs::read_to_string(manifest_path).unwrap();
+        use sha2::{Digest, Sha256};
+        for line in content.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() == 2 {
+                let expected_sha = parts[0];
+                let path = parts[1];
+                let resolved_file = if std::path::Path::new(path).exists() {
+                    path.to_string()
+                } else {
+                    format!("../../{}", path)
+                };
+                if std::path::Path::new(&resolved_file).exists() {
+                    let bytes = fs::read(&resolved_file).unwrap();
+                    let mut hasher = Sha256::new();
+                    hasher.update(&bytes);
+                    let actual_sha = hex::encode(hasher.finalize());
+                    assert_eq!(actual_sha, expected_sha, "Manifest mismatch for {}", resolved_file);
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_rust_acceptance_10_daemon_integration_webhook_and_vacuum() {
+    use axum::http::{HeaderMap, StatusCode};
+
+    let (lease_mgr, ledger, dir) = setup_env("acc10");
+    let router = Arc::new(SmartRouter::new(0, lease_mgr, ledger.clone(), true));
+    let db_path = format!("{}/test.db", dir);
+    let db = fleetd::db::Database::new(std::path::Path::new(&db_path)).unwrap();
+    let mut config = fleetd::config::Config::load();
+    config.linear_webhook_secret = None;
+    config.allowed_teams = vec!["MIN".to_string(), "PRD".to_string()];
+
+    let app_state = fleetd::server::AppState {
+        config: config.clone(),
+        db: db.clone(),
+        router: router.clone(),
+        linear: None,
+    };
+
+    // 10a: Webhook path with uncanonical issue (missing project) -> REJECTED, not enqueued!
+    let uncanonical_payload = serde_json::json!({
+        "type": "Issue",
+        "action": "create",
+        "data": {
+            "id": "ISSUE-NOPROJ",
+            "identifier": "MIN-991",
+            "title": "Uncanonical task",
+            "description": "Builder: agy\nTier: ВП\nMissing project link",
+            "team": { "key": "MIN" },
+            "state": { "name": "Todo" },
+            "labels": [{ "name": "Builder: agy" }]
+        }
+    });
+
+    let mut headers1 = HeaderMap::new();
+    headers1.insert("Linear-Delivery", "deliv-1".parse().unwrap());
+    let (status, body) = fleetd::server::handle_webhook(
+        app_state.clone(),
+        headers1,
+        axum::body::Bytes::from(uncanonical_payload.to_string()),
+    ).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["status"], "rejected");
+    assert_eq!(body["reason"], "MISSING_PROJECT");
+    // Verify NOT enqueued in SQLite
+    assert!(!db.is_issue_already_enqueued("ISSUE-NOPROJ"));
+
+    // 10b: Valid webhook -> CLAIMED with handoff commit, enqueued!
+    let valid_payload = serde_json::json!({
+        "type": "Issue",
+        "action": "create",
+        "data": {
+            "id": "ISSUE-VALID",
+            "identifier": "MIN-992",
+            "title": "Valid task",
+            "description": "Builder: agy\nTier: ВП\nProject: fleetd self-evolution\ncommit_sha: 16590a7574b188225896cdf99268bc476cbe18a3",
+            "projectName": "fleetd self-evolution",
+            "team": { "key": "MIN" },
+            "state": { "name": "Todo" },
+            "labels": [{ "name": "Builder: agy" }]
+        }
+    });
+
+    let mut headers2 = HeaderMap::new();
+    headers2.insert("Linear-Delivery", "deliv-2".parse().unwrap());
+    let (status_valid, body_valid) = fleetd::server::handle_webhook(
+        app_state.clone(),
+        headers2,
+        axum::body::Bytes::from(valid_payload.to_string()),
+    ).await;
+
+    assert_eq!(status_valid, StatusCode::OK);
+    assert_eq!(body_valid["status"], "queued");
+    assert!(db.is_issue_already_enqueued("ISSUE-VALID"));
+
+    // 10c: Second webhook for same issue -> duplicate rejected!
+    let mut headers3 = HeaderMap::new();
+    headers3.insert("Linear-Delivery", "deliv-3".parse().unwrap());
+    let (status_dup, body_dup) = fleetd::server::handle_webhook(
+        app_state,
+        headers3,
+        axum::body::Bytes::from(valid_payload.to_string()),
+    ).await;
+
+    assert_eq!(status_dup, StatusCode::OK);
+    assert_eq!(body_dup["status"], "already_queued");
+
+    // 10d: Vacuum candidate conversion & canonical rejection test
+    let cand_no_proj = fleetd::linear::LinearIssueCandidate {
+        id: "VAC-NOPROJ".to_string(),
+        identifier: "MIN-993".to_string(),
+        title: "No project vacuum candidate".to_string(),
+        description: "Builder: agy\nTier: ВС\nNo project anywhere".to_string(),
+        labels: vec![],
+        project_name: None,
+        state_name: Some("Todo".to_string()),
+        state_type: Some("unstarted".to_string()),
+        assignee_name: None,
+        created_at: None,
+        updated_at: None,
+    };
+    let verdict = fleetd::canonical::validate_canonical_rules(
+        cand_no_proj.project_name.as_deref(),
+        &cand_no_proj.title,
+        &cand_no_proj.description,
+        cand_no_proj.state_name.as_deref(),
+        None,
+        cand_no_proj.assignee_name.as_deref(),
+    );
+    assert!(!verdict.passed);
+    assert_eq!(verdict.reason, "MISSING_PROJECT");
 }

@@ -39,6 +39,30 @@ class CanonicalVerdict:
         }
 
 
+def extract_project_from_text(text: str) -> Optional[str]:
+    for line in text.splitlines():
+        trimmed = line.strip()
+        if "Project:" in trimmed:
+            idx = trimmed.find("Project:")
+            after = trimmed[idx + 8:].strip()
+            if not after:
+                continue
+            if ">" in after and "</project>" in after:
+                start_tag = after.find(">")
+                end_tag = after.find("</project>", start_tag + 1)
+                name = after[start_tag + 1:end_tag].strip()
+                if name:
+                    return name
+            clean = after.strip("*`[]\" ")
+            if not clean:
+                continue
+            name = clean.split("\n")[0].strip()
+            first_seg = name.split("**")[0].split(" — ")[0].strip()
+            if first_seg:
+                return first_seg
+    return None
+
+
 def validate_canonical_rules(task: Dict[str, Any]) -> CanonicalVerdict:
     """
     Validates task against canonical rules before dispatching to any builder.
@@ -66,19 +90,25 @@ def validate_canonical_rules(task: Dict[str, Any]) -> CanonicalVerdict:
             rework_comment=f"@PM REWORK: Задача в статусе '{status}' не готова к выдаче. Допустимы только 'Todo' или 'Backlog'.",
         )
 
-    # 1. Project mandatory check
-    project = task.get("project")
-    if not project or (isinstance(project, str) and not project.strip()):
-        return CanonicalVerdict(
-            passed=False,
-            reason="MISSING_PROJECT",
-            rework_comment="@PM REWORK: Задача не привязана к Linear Project. Привязка к проекту обязательна для выдачи билдеру.",
-        )
-
-    # 2. Tier mandatory check
+    # Combined text for project, tier and marker checks
     description = task.get("description", "") or ""
     title = task.get("title", "") or ""
     combined_text = f"{title}\n{description}"
+
+    # 1. Project mandatory check
+    project = task.get("project")
+    if not project or (isinstance(project, str) and not project.strip()):
+        extracted_p = extract_project_from_text(combined_text)
+        if extracted_p:
+            project = extracted_p
+        else:
+            return CanonicalVerdict(
+                passed=False,
+                reason="MISSING_PROJECT",
+                rework_comment="@PM REWORK: Задача не привязана к Linear Project. Привязка к проекту обязательна для выдачи билдеру.",
+            )
+
+    # 2. Tier mandatory check
 
     tier_match = TIER_REGEX.search(combined_text)
     if not tier_match:

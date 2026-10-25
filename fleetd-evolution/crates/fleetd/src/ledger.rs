@@ -36,7 +36,10 @@ impl RoutingLedger {
         {
             use std::os::unix::io::AsRawFd;
             let fd = file.as_raw_fd();
-            let _ = unsafe { libc::flock(fd, libc::LOCK_EX) };
+            let ret = unsafe { libc::flock(fd, libc::LOCK_EX) };
+            if ret != 0 {
+                return Err(format!("flock LOCK_EX failed on ledger {:?}: errno {}", self.ledger_path, ret));
+            }
         }
 
         let line = serde_json::to_string(&entry)
@@ -50,7 +53,10 @@ impl RoutingLedger {
         {
             use std::os::unix::io::AsRawFd;
             let fd = file.as_raw_fd();
-            let _ = unsafe { libc::flock(fd, libc::LOCK_UN) };
+            let ret_un = unsafe { libc::flock(fd, libc::LOCK_UN) };
+            if ret_un != 0 {
+                return Err(format!("flock LOCK_UN failed on ledger {:?}: errno {}", self.ledger_path, ret_un));
+            }
         }
 
         Ok(())
