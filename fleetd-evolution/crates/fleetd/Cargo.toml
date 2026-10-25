@@ -3,6 +3,14 @@ name = "fleetd"
 version = "0.2.0"
 edition = "2021"
 
+[lib]
+name = "fleetd"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fleetd"
+path = "src/main.rs"
+
 [dependencies]
 tokio = { version = "1.38", features = ["full"] }
 axum = { version = "0.7", features = ["macros"] }
@@ -16,3 +24,4 @@ reqwest = { version = "0.12", features = ["json"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.8", features = ["v4"] }
+libc = "0.2"

@@ -1,14 +1,8 @@
-mod config;
-mod db;
-mod linear;
-mod runner;
-mod server;
-mod vacuum;
-mod worker;
-
-use config::Config;
-use db::Database;
-use server::{create_router, AppState};
+use fleetd::config::Config;
+use fleetd::db::Database;
+use fleetd::server::{create_router, AppState};
+use fleetd::vacuum;
+use fleetd::worker;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 

@@ -1,9 +1,10 @@
 """
 Pilot & Health-Check Protocol (fleetd vNext - Section 6)
-1. Fail-closed health-check of codex-local slot.
-2. Pilot verification for MIN-221 (Collatz M3) with reproducible git handoff and QA audit check.
+1. Fail-closed health-check of codex-local slot with git handoff capability probe.
+2. Pilot verification for MIN-221 (Collatz M3) with reproducible git clean clone and independent QA receipt audit.
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -21,7 +22,7 @@ def run_codex_health_check(
 ) -> Dict[str, Any]:
     """
     Performs real health probe for codex-local builder.
-    Verifies that executable exists and can execute commands without error.
+    Verifies that executable exists, is authenticated, and can perform git operations.
     Returns structured health status dictionary (fail-closed).
     """
     if force_status is not None:
@@ -43,7 +44,7 @@ def run_codex_health_check(
             "details": f"Executable not found at {codex_bin}",
         }
 
-    # Execute health check probe
+    # 1. Execute CLI version check
     try:
         proc = subprocess.run(
             [codex_bin, "--version"],
@@ -58,18 +59,17 @@ def run_codex_health_check(
                 "status": "HEALTH_FAILED",
                 "git_capable": False,
                 "isolation_verified": False,
-                "details": f"CLI returned exit code {proc.returncode}: {proc.stderr.strip()}",
+                "details": f"Codex runner CLI returned exit code {proc.returncode}: {proc.stderr.strip()}",
             }
 
-        # Check authentication / probe response with fast timeout
+        # 2. Check authentication / probe execution
         probe_res = subprocess.run(
             [codex_bin, "exec", "--color", "never", "echo health_probe"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=3,
+            timeout=5,
         )
-        # Note: If backend returns 403 Forbidden or websocket error, fail closed
         combined_out = f"{probe_res.stdout}\n{probe_res.stderr}"
         if "403 Forbidden" in combined_out or probe_res.returncode != 0:
             return {
@@ -79,6 +79,40 @@ def run_codex_health_check(
                 "isolation_verified": False,
                 "details": f"Codex runner authentication failed (HTTP 403 / unauthenticated): {probe_res.stderr.strip()[:200]}",
             }
+
+        # 3. Verify real git handoff capability (probe temporary git isolation)
+        test_dir = tempfile.mkdtemp(prefix="codex_git_probe_")
+        try:
+            init_res = subprocess.run(["git", "init", test_dir], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
+            if init_res.returncode != 0:
+                return {
+                    "slot": "codex-local",
+                    "status": "HEALTH_FAILED",
+                    "git_capable": False,
+                    "isolation_verified": False,
+                    "details": f"Git initialization probe failed: {init_res.stderr.strip()}",
+                }
+            probe_file = os.path.join(test_dir, "probe.txt")
+            with open(probe_file, "w") as f:
+                f.write("health_probe")
+            subprocess.run(["git", "-C", test_dir, "add", "probe.txt"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
+            commit_res = subprocess.run(
+                ["git", "-C", test_dir, "-c", "user.name=Probe", "-c", "user.email=probe@local", "commit", "-m", "probe"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+            )
+            if commit_res.returncode != 0:
+                return {
+                    "slot": "codex-local",
+                    "status": "HEALTH_FAILED",
+                    "git_capable": False,
+                    "isolation_verified": False,
+                    "details": f"Git commit probe failed: {commit_res.stderr.strip()}",
+                }
+        finally:
+            shutil.rmtree(test_dir, ignore_errors=True)
 
         return {
             "slot": "codex-local",
@@ -103,60 +137,6 @@ def run_codex_health_check(
             "isolation_verified": False,
             "details": f"Codex runner probe error: {str(e)}",
         }
-
-
-def execute_pilot_task_min_221(
-    repo_url: str = PILOT_REPO_URL,
-    branch: str = PILOT_BRANCH,
-    commit_sha: str = PILOT_COMMIT_SHA,
-) -> Dict[str, Any]:
-    """
-    Executes the pilot protocol for MIN-221 (Collatz M3) according to §6:
-    - Target: Collatz M3 CacheCheck
-    - Tier: ВП
-    - Git Coordinates: https://github.com/pashamango/math.git @ collatz-v0.1.0-m3 (commit 16590a75...)
-    - Verification: Checks git reachability and independent QA receipt.
-      Currently, the recorded independent QA verdict by Codex QA is FAIL (CacheCheck.lean tautology).
-      Under fail-closed §6.3, fallback CANNOT be activated until an independent QA PASS is obtained.
-    """
-    # 1. Verify remote git coordinates exist
-    remote_check = subprocess.run(
-        ["git", "ls-remote", repo_url, f"refs/heads/{branch}"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=15,
-    )
-    remote_reachable = (remote_check.returncode == 0 and commit_sha in remote_check.stdout)
-
-    # 2. Check independent QA verdict from recorded audit receipt
-    # The real status from Linear issue MIN-221 is: FAIL (Requires rework on linear complexity claim)
-    qa_verdict = "FAIL"
-    qa_blocker = "CacheCheck.lean: stepsCount tautology does not prove O(|w|) runtime bound of verifyPath"
-
-    pilot_passed = (remote_reachable and qa_verdict == "PASS")
-
-    return {
-        "task_id": "MIN-221",
-        "title": "Collatz v0.1.0 — M3: CacheCheck (S, τ, линейный чекер пути)",
-        "tier": "ВП",
-        "slot": "codex-local",
-        "pilot_status": "PILOT_FAIL_AWAITING_FIX" if not pilot_passed else "PILOT_PASS",
-        "pilot_passed": pilot_passed,
-        "fallback_activation_permitted": pilot_passed,
-        "git_handoff": {
-            "repo_url": repo_url,
-            "branch": branch,
-            "commit_sha": commit_sha,
-            "remote_verified": remote_reachable,
-        },
-        "independent_qa": {
-            "reviewer": "Codex (Independent QA)",
-            "verdict": qa_verdict,
-            "blocker": qa_blocker,
-        },
-        "verdict_gate": "Requires independent QA PASS before activating queue fallback (§6.3)",
-    }
 
 
 def verify_pilot_git_handoff_clean_clone(
@@ -202,3 +182,77 @@ def verify_pilot_git_handoff_clean_clone(
     finally:
         if cleanup and os.path.exists(target_dir):
             shutil.rmtree(target_dir, ignore_errors=True)
+
+
+def execute_pilot_task_min_221(
+    repo_url: str = PILOT_REPO_URL,
+    branch: str = PILOT_BRANCH,
+    commit_sha: str = PILOT_COMMIT_SHA,
+    receipt_path: Optional[str] = "fleetd-evolution/evidence/PILOT_MIN_221_RECEIPT.json",
+    verify_clone: bool = True,
+) -> Dict[str, Any]:
+    """
+    Executes the pilot protocol for MIN-221 (Collatz M3) according to §6:
+    - Target: Collatz M3 CacheCheck
+    - Tier: ВП
+    - Git Coordinates: https://github.com/pashamango/math.git @ collatz-v0.1.0-m3 (commit 16590a75...)
+    - Verification:
+      1. Performs clean-clone or ls-remote verification of git coordinates.
+      2. Validates independent QA audit receipt from receipt_path.
+      Under fail-closed §6.3, fallback CANNOT be activated until an independent QA PASS is verified.
+    """
+    # 1. Clean clone verification of git handoff
+    clean_clone_ok = False
+    if verify_clone:
+        clone_res = verify_pilot_git_handoff_clean_clone(repo_url, branch, commit_sha)
+        clean_clone_ok = clone_res.get("success", False)
+    else:
+        remote_check = subprocess.run(
+            ["git", "ls-remote", repo_url, f"refs/heads/{branch}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+        )
+        clean_clone_ok = (remote_check.returncode == 0 and commit_sha in remote_check.stdout)
+
+    # 2. Load and verify independent QA receipt
+    qa_reviewer = "Unknown"
+    qa_verdict = "MISSING_RECEIPT"
+    qa_blocker = "No receipt found at specified path"
+
+    if receipt_path and os.path.exists(receipt_path):
+        try:
+            with open(receipt_path, "r", encoding="utf-8") as f:
+                receipt_data = json.load(f)
+            qa_audit = receipt_data.get("independent_qa_audit", {})
+            qa_reviewer = qa_audit.get("reviewer", "Codex (Independent QA)")
+            qa_verdict = qa_audit.get("verdict", "FAIL")
+            qa_blocker = qa_audit.get("summary", "")
+        except Exception as e:
+            qa_verdict = "CORRUPTED_RECEIPT"
+            qa_blocker = f"Receipt decode error: {e}"
+
+    pilot_passed = (clean_clone_ok and qa_verdict == "PASS")
+
+    return {
+        "task_id": "MIN-221",
+        "title": "Collatz v0.1.0 — M3: CacheCheck (S, τ, линейный чекер пути)",
+        "tier": "ВП",
+        "slot": "codex-local",
+        "pilot_status": "PILOT_PASS" if pilot_passed else "PILOT_FAIL_AWAITING_FIX",
+        "pilot_passed": pilot_passed,
+        "fallback_activation_permitted": pilot_passed,
+        "git_handoff": {
+            "repo_url": repo_url,
+            "branch": branch,
+            "commit_sha": commit_sha,
+            "clean_clone_verified": clean_clone_ok,
+        },
+        "independent_qa": {
+            "reviewer": qa_reviewer,
+            "verdict": qa_verdict,
+            "blocker": qa_blocker,
+        },
+        "verdict_gate": "Requires independent QA PASS before activating queue fallback (§6.3)",
+    }

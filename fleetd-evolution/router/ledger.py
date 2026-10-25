@@ -10,6 +10,7 @@ Includes baseline evaluation and automated rollback upon metric degradation:
 - uncanonical_dispatched: count of uncanonical tasks dispatched to builders (must be 0)
 """
 
+import fcntl
 import json
 import os
 import time
@@ -24,7 +25,12 @@ class RoutingLedger:
     def record_decision(self, entry: Dict[str, Any]):
         entry["timestamp"] = entry.get("timestamp", time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
         with open(self.ledger_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                f.flush()
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
     def read_records(self) -> List[Dict[str, Any]]:
         if not os.path.exists(self.ledger_path):

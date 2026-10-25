@@ -296,6 +296,7 @@ dependencies = [
  "axum",
  "hex",
  "hmac",
+ "libc",
  "reqwest",
  "rusqlite",
  "serde",

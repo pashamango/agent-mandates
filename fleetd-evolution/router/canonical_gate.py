@@ -18,16 +18,24 @@ RAW_BUILDER_REGEX = re.compile(r"Builder:\s*([^\s\n\r]+)", re.IGNORECASE)
 
 
 class CanonicalVerdict:
-    def __init__(self, passed: bool, reason: str, rework_comment: Optional[str] = None):
+    def __init__(
+        self,
+        passed: bool,
+        reason: str,
+        rework_comment: Optional[str] = None,
+        extracted_tier: Optional[str] = None,
+    ):
         self.passed = passed
         self.reason = reason
         self.rework_comment = rework_comment
+        self.extracted_tier = extracted_tier
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "passed": self.passed,
             "reason": self.reason,
             "rework_comment": self.rework_comment,
+            "extracted_tier": self.extracted_tier,
         }
 
 
@@ -36,22 +44,27 @@ def validate_canonical_rules(task: Dict[str, Any]) -> CanonicalVerdict:
     Validates task against canonical rules before dispatching to any builder.
     Returns CanonicalVerdict.
     """
-    # 0. Status check: tasks with status 'Done', 'Canceled', etc. are not dispatchable
+    # 0. Status check: status is mandatory and only 'Todo' or 'Backlog' are dispatchable
     status = task.get("status")
-    if status:
-        normalized_status = status.strip().lower()
-        if normalized_status in {"done", "completed", "closed"}:
-            return CanonicalVerdict(
-                passed=False,
-                reason="ALREADY_DONE",
-                rework_comment="@PM REWORK: Задача уже находится в статусе Done. Повторный захват запрещён.",
-            )
-        if normalized_status not in {"todo", "backlog"}:
-            return CanonicalVerdict(
-                passed=False,
-                reason=f"INVALID_STATUS_{status.upper()}",
-                rework_comment=f"@PM REWORK: Задача в статусе '{status}' не готова к выдаче. Допустимы только 'Todo' или 'Backlog'.",
-            )
+    if not status or not str(status).strip():
+        return CanonicalVerdict(
+            passed=False,
+            reason="MISSING_STATUS",
+            rework_comment="@PM REWORK: Отсутствует статус задачи. Допустимы только 'Todo' или 'Backlog'.",
+        )
+    normalized_status = str(status).strip().lower()
+    if normalized_status in {"done", "completed", "closed"}:
+        return CanonicalVerdict(
+            passed=False,
+            reason="ALREADY_DONE",
+            rework_comment="@PM REWORK: Задача уже находится в статусе Done. Повторный захват запрещён.",
+        )
+    if normalized_status not in {"todo", "backlog"}:
+        return CanonicalVerdict(
+            passed=False,
+            reason=f"INVALID_STATUS_{str(status).strip().upper()}",
+            rework_comment=f"@PM REWORK: Задача в статусе '{status}' не готова к выдаче. Допустимы только 'Todo' или 'Backlog'.",
+        )
 
     # 1. Project mandatory check
     project = task.get("project")
@@ -75,6 +88,17 @@ def validate_canonical_rules(task: Dict[str, Any]) -> CanonicalVerdict:
             rework_comment="@PM REWORK: Отсутствует классификация тира задачи (Tier: ВС/ВП/МС/МП). Укажите тир в описании.",
         )
     tier = tier_match.group(1).upper()
+
+    # Tier reconciliation: if explicit tier is provided, it must match extracted tier
+    explicit_tier = task.get("tier")
+    if explicit_tier:
+        explicit_clean = str(explicit_tier).strip().upper()
+        if explicit_clean != tier:
+            return CanonicalVerdict(
+                passed=False,
+                reason="TIER_MISMATCH",
+                rework_comment=f"@PM REWORK: Конфликт тира в задаче. Значение поля tier ('{explicit_clean}') противоречит тиру в описании ('{tier}').",
+            )
 
     # 3. Submitted = Frozen check (Tier MP post-submission)
     if tier == "МП":
@@ -144,4 +168,4 @@ def validate_canonical_rules(task: Dict[str, Any]) -> CanonicalVerdict:
                 rework_comment=f"@PM REWORK: Неоднозначный маркер билдера 'Builder: {cleaned}'. Исправьте маркировку лейна на agy или codex.",
             )
 
-    return CanonicalVerdict(passed=True, reason="CANONICAL_PASS")
+    return CanonicalVerdict(passed=True, reason="CANONICAL_PASS", extracted_tier=tier)

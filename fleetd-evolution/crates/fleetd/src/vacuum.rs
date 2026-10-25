@@ -1,9 +1,14 @@
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 
+use crate::canonical::validate_canonical_rules;
 use crate::config::Config;
 use crate::db::Database;
+use crate::lease::DurableLeaseManager;
+use crate::ledger::RoutingLedger;
 use crate::linear::LinearClient;
+use crate::router::{SmartRouter, TaskCandidate};
 
 pub async fn run_vacuum_loop(config: Config, db: Database) {
     if !config.vacuum_enabled {
@@ -17,6 +22,10 @@ pub async fn run_vacuum_loop(config: Config, db: Database) {
     );
 
     let linear = LinearClient::new(&config.linear_api_url, &config.linear_api_key);
+    let lease_manager = Arc::new(DurableLeaseManager::new("fleetd-evolution/data/active_leases.json"));
+    let ledger = Arc::new(RoutingLedger::new("fleetd-evolution/data/routing_ledger.jsonl"));
+    // Fail-closed default for pilot_passed (§6.3)
+    let router = SmartRouter::new(300, lease_manager, ledger, false);
 
     // Initial delay so fleetd settles on startup
     tokio::time::sleep(Duration::from_secs(10)).await;
@@ -41,14 +50,7 @@ pub async fn run_vacuum_loop(config: Config, db: Database) {
             continue;
         }
 
-        // Priority to agy first, then codex
-        let candidate_builder = if !agy_active {
-            "agy"
-        } else {
-            "codex"
-        };
-
-        info!("Vacuum checking for backlog candidates (idle slot: {})", candidate_builder);
+        info!("Vacuum checking for backlog candidates");
 
         match linear.fetch_vacuum_candidates(&config.allowed_teams, 10).await {
             Ok(candidates) => {
@@ -86,31 +88,54 @@ pub async fn run_vacuum_loop(config: Config, db: Database) {
                     let has_host_wolfram = candidate.labels.iter().any(|l| l.eq_ignore_ascii_case("Host: wolfram"));
 
                     if config.node_name == "wolfram" && has_host_darwin {
-                        // Leave task for Darwin node
                         continue;
                     }
                     if config.node_name == "darwin" && has_host_wolfram {
-                        // Leave task for Wolfram node
                         continue;
                     }
 
-                    // Respect explicit Builder label if set on the candidate
-                    let issue_builder = if candidate.labels.iter().any(|l| l.eq_ignore_ascii_case("Builder: codex")) {
-                        "codex"
-                    } else if candidate.labels.iter().any(|l| l.eq_ignore_ascii_case("Builder: agy")) {
-                        "agy"
-                    } else {
-                        candidate_builder
+                    // 1. Canonical validation pre-check (§4)
+                    let verdict = validate_canonical_rules(
+                        None, // Project will be checked from candidate description or GraphQL
+                        &candidate.title,
+                        &candidate.description,
+                        Some("Todo"),
+                        None,
+                        None,
+                    );
+
+                    if !verdict.passed {
+                        if let Some(comment) = &verdict.rework_comment {
+                            info!("Vacuum canonical rejection for {}: {}", candidate.identifier, verdict.reason);
+                            let _ = linear.post_comment(&candidate.id, comment).await;
+                        }
+                        continue;
+                    }
+
+                    // 2. Smart routing & atomic single lease check (§3, §5, §6)
+                    let task_cand = TaskCandidate {
+                        id: candidate.id.clone(),
+                        title: candidate.title.clone(),
+                        description: candidate.description.clone(),
+                        project: Some("Linear Project".to_string()),
+                        tier: verdict.extracted_tier,
+                        status: Some("Todo".to_string()),
+                        assignee: None,
+                        wait_time_secs: 0,
                     };
 
-                    // Only take if the target slot is currently free
-                    if (issue_builder == "agy" && agy_active) || (issue_builder == "codex" && codex_active) {
+                    let decision = router.route_and_claim_task(&task_cand, 3600, false, None);
+                    if !decision.success {
+                        info!("Vacuum router skipped {}: {}", candidate.identifier, decision.reason);
                         continue;
                     }
+
+                    let issue_builder = decision.slot.unwrap_or_else(|| "agy".to_string());
+                    let slot_name = if issue_builder == "codex-local" { "codex" } else { "agy" };
 
                     info!(
                         "Vacuum claiming issue {} ({}) for builder {}",
-                        candidate.identifier, candidate.title, issue_builder
+                        candidate.identifier, candidate.title, slot_name
                     );
 
                     // 1. Move to In Progress
@@ -123,7 +148,7 @@ pub async fn run_vacuum_loop(config: Config, db: Database) {
                     let claim_marker = format!("<!-- vacuum-claim:{} -->", candidate.id);
                     let claim_body = format!(
                         "🤖 **Vacuum Auto-Claim**\n{}\nProactively pulled from backlog into `In Progress` for autonomous builder `{}`.\nExecution started on Wolfram.",
-                        claim_marker, issue_builder
+                        claim_marker, slot_name
                     );
                     let _ = linear.post_comment(&candidate.id, &claim_body).await;
 
@@ -136,7 +161,7 @@ pub async fn run_vacuum_loop(config: Config, db: Database) {
                         &candidate.title,
                         &candidate.description,
                         "START",
-                        issue_builder,
+                        slot_name,
                     );
 
                     info!("Vacuum successfully claimed and enqueued {}", candidate.identifier);

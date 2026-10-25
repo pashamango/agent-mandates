@@ -13,6 +13,7 @@ import fcntl
 import json
 import os
 import time
+import re
 from typing import Dict, Any, Optional, Tuple, List
 from .canonical_gate import validate_canonical_rules
 from .ledger import RoutingLedger
@@ -66,10 +67,16 @@ class DurableLeaseManager:
             return {}
         try:
             with open(self.lease_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
+                content = f.read().strip()
+                if not content:
+                    return {}
+                data = json.loads(content)
+                if not isinstance(data, dict):
+                    raise ValueError(f"Expected JSON dict, got {type(data)}")
                 return {k: LeaseRecord.from_dict(v) for k, v in data.items()}
-        except Exception:
-            return {}
+        except Exception as e:
+            # Corrupted lease database must fail-closed, never assumed empty!
+            raise RuntimeError(f"FATAL: Corrupted lease storage at {self.lease_file}: {e}")
 
     def _write_leases_locked(self, leases: Dict[str, LeaseRecord]):
         data = {k: v.to_dict() for k, v in leases.items() if not v.is_expired()}
@@ -143,7 +150,7 @@ class SmartRouter:
         pacing_secs: int = 300,
         ledger: Optional[RoutingLedger] = None,
         lease_manager: Optional[DurableLeaseManager] = None,
-        pilot_passed: bool = True,
+        pilot_passed: bool = False,
     ):
         self.pacing_secs = pacing_secs
         self.last_agy_start: float = 0.0
@@ -167,19 +174,27 @@ class SmartRouter:
     def simulate_local_model_decision(self, task: Dict[str, Any], timeout_simulate: bool = False) -> Optional[str]:
         """
         Local Wolfram offline routing model decision logic.
-        Evaluates task attributes (tier, wait time, quota) and outputs target slot.
+        Evaluates task attributes (tier, wait time, quota, status) and outputs target slot.
         If timeout_simulate is True, exceeds latency budget and triggers deterministic fallback.
         """
         if timeout_simulate:
             return None
 
-        tier = task.get("tier", "ВП")
+        # Extract tier from description or task
+        description = task.get("description", "") or ""
+        title = task.get("title", "") or ""
+        combined_text = f"{title}\n{description}"
+        tier_match = re.search(r"\bTier:\s*(ВС|ВП|МС|МП)\b", combined_text, re.IGNORECASE)
+        tier = tier_match.group(1).upper() if tier_match else task.get("tier")
+        status = task.get("status")
         wait_time = task.get("wait_time_secs", 0)
         agy_quota = self.slot_quota_status.get("agy", "OK")
 
         # Fallback conditions according to §3.3:
-        # Tier is ВС or ВП, and wait > 2h OR agy quota exhausted
-        if tier in {"ВС", "ВП"} and (wait_time > 7200 or agy_quota != "OK"):
+        # Tier is ВС or ВП, and wait > 2h in Todo OR agy quota exhausted
+        time_trigger = (wait_time > 7200 and status == "Todo")
+        quota_trigger = (agy_quota != "OK")
+        if tier in {"ВС", "ВП"} and (time_trigger or quota_trigger):
             return "codex-local"
         return "agy"
 
@@ -246,7 +261,8 @@ class SmartRouter:
                 "fallback": "deterministic_rules",
             })
 
-        tier = task.get("tier", "ВП")
+        tier = verdict.extracted_tier or task.get("tier")
+        status = task.get("status")
         wait_time_secs = task.get("wait_time_secs", 0)
         agy_quota = self.slot_quota_status.get("agy", "OK")
         codex_quota = self.slot_quota_status.get("codex-local", "OK")
@@ -256,23 +272,43 @@ class SmartRouter:
         # 4. Strict evaluation of fallback eligibility (§3.3, §6)
         # Conditions:
         # - Strictly ВС or ВП
-        # - wait_time > 7200 OR agy quota exhausted
+        # - wait_time > 7200 in Todo OR agy quota exhausted
         # - concurrent fallback <= 1
         # - codex-local healthy and quota OK
         # - pilot passed (§6)
-        is_fallback_candidate = (
+        time_trigger = (wait_time_secs > 7200 and status == "Todo")
+        quota_trigger = (agy_quota != "OK")
+        triggers_met = time_trigger or quota_trigger
+
+        is_candidate_by_policy = (
             tier in {"ВС", "ВП"}
-            and (wait_time_secs > 7200 or agy_quota != "OK")
+            and triggers_met
             and codex_health == "HEALTH_OK"
             and codex_quota == "OK"
-            and self.pilot_passed is True
             and fallback_active_count < 1
         )
+        is_fallback_candidate = (is_candidate_by_policy and self.pilot_passed is True)
 
         # 5. Resolve target slot based on model recommendation and policy guards
         if suggested_slot == "codex-local":
             if is_fallback_candidate:
                 target_slot = "codex-local"
+            elif is_candidate_by_policy and not self.pilot_passed:
+                # Fallback conditions met, but pilot gate is not passed -> fail closed!
+                incident = {
+                    "task_id": task_id,
+                    "event": "PILOT_GATE_BLOCKED",
+                    "reason": "PILOT_NOT_PASSED",
+                    "timestamp": time.time(),
+                }
+                self.incidents.append(incident)
+                self.ledger.record_decision({
+                    "task_id": task_id,
+                    "event": "PILOT_GATE_BLOCKED",
+                    "slot": "codex-local",
+                    "reason": "PILOT_NOT_PASSED",
+                })
+                return False, None, "PILOT_GATE_BLOCKED_FALLBACK_DISABLED"
             else:
                 # Model recommended codex-local but constraints are not met -> fail-closed safety!
                 # If agy quota is exhausted, fail-closed without silent transfer
@@ -291,6 +327,14 @@ class SmartRouter:
             if agy_quota != "OK":
                 if is_fallback_candidate:
                     target_slot = "codex-local"
+                elif is_candidate_by_policy and not self.pilot_passed:
+                    self.ledger.record_decision({
+                        "task_id": task_id,
+                        "event": "PILOT_GATE_BLOCKED",
+                        "slot": "codex-local",
+                        "reason": "PILOT_NOT_PASSED",
+                    })
+                    return False, None, "PILOT_GATE_BLOCKED_FALLBACK_DISABLED"
                 else:
                     reason = "SLOT_QUOTA_EXHAUSTED_AGY"
                     self.ledger.record_decision({
