@@ -251,9 +251,13 @@ fn test_rust_acceptance_7_model_decision_and_deterministic_fallback() {
         wait_time_secs: 8000,
     };
 
-    // 7a: Active model suggestion
-    let suggested = router.simulate_local_model_decision(&task, false);
-    assert_eq!(suggested.as_deref(), Some("codex-local"));
+    // 7a: Active model offline inference
+    let model_dec = router.infer_local_model_decision(&task, false);
+    assert!(model_dec.is_some());
+    let dec = model_dec.unwrap();
+    assert_eq!(dec.recommended_slot, "codex-local");
+    assert_eq!(dec.model_id, "mindrock-router-qwen2.5-0.5b-q4_k_m");
+    assert!(dec.confidence > 0.5);
 
     // 7b: Timeout triggers deterministic fallback
     let dec_timeout = router.route_and_claim_task(&task, 3600, true, None);
@@ -304,11 +308,45 @@ fn test_rust_acceptance_9_zero_trust_lease_and_gate_properties() {
     let (lease_mgr, ledger, dir) = setup_env("acc9");
     let router = SmartRouter::new(0, lease_mgr.clone(), ledger, false);
 
-    // 9a: Fail-closed health check of codex runner
+    // 9a: Fail-closed health check of codex runner (binary missing)
     router.refresh_slot_health("/nonexistent/bin/codex");
     assert_eq!(
         router.slot_health_status.lock().unwrap().get("codex-local").unwrap(),
         "HEALTH_FAILED"
+    );
+
+    // 9a-2: Active probe verification with mock codex compliant with §6.1
+    let probe_script = format!("{}/mock_codex.sh", dir);
+    fs::write(
+        &probe_script,
+        r#"#!/bin/bash
+if [ "$1" = "--version" ]; then
+    echo "codex-local 0.153.4"
+    exit 0
+fi
+if [ "$1" = "--health-probe" ]; then
+    TARGET_DIR="$2"
+    cd "$TARGET_DIR" || exit 1
+    mkdir -p evidence
+    echo '{"probe": true}' > task.json
+    git -c user.name=Codex -c user.email=codex@mindrock.capital add task.json
+    git -c user.name=Codex -c user.email=codex@mindrock.capital commit -m "probe commit" >/dev/null 2>&1
+    SHA=$(git rev-parse HEAD)
+    echo "{\"repo_url\": \"file://$TARGET_DIR\", \"branch\": \"probe\", \"commit_sha\": \"$SHA\"}" > evidence/HANDOFF.json
+    exit 0
+fi
+exit 1
+"#,
+    ).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&probe_script, fs::Permissions::from_mode(0o755));
+    }
+    router.refresh_slot_health(&probe_script);
+    assert_eq!(
+        router.slot_health_status.lock().unwrap().get("codex-local").unwrap(),
+        "HEALTH_OK"
     );
 
     // 9b: Pilot receipt verification from real file (§6.3)
@@ -324,10 +362,10 @@ fn test_rust_acceptance_9_zero_trust_lease_and_gate_properties() {
     assert!(!passed);
     assert!(reason.contains("FAIL"));
 
-    // Verify dynamic gate opening on simulated PASS receipt with complete git coordinates and independent QA
-    let pass_receipt = format!("{}/pass_receipt.json", dir);
+    // 9b-1: Unmanifested receipt fails closed (Defect 3)
+    let unmanifested_receipt = format!("{}/unmanifested_pass_receipt.json", dir);
     fs::write(
-        &pass_receipt,
+        &unmanifested_receipt,
         serde_json::json!({
             "pilot_task_id": "MIN-221",
             "tier": "ВП",
@@ -338,16 +376,16 @@ fn test_rust_acceptance_9_zero_trust_lease_and_gate_properties() {
             },
             "independent_qa_audit": {
                 "reviewer": "Codex (Independent QA)",
+                "reviewer_id": "3bc09df8-b112-4d8d-8d0c-519043c77030",
                 "verdict": "PASS"
             }
         }).to_string(),
     ).unwrap();
-    let (pass_ok, reason) = fleetd::router::verify_pilot_receipt(&pass_receipt);
-    assert!(pass_ok, "Expected pass_ok, got: {}", reason);
-    router.refresh_pilot_gate(&pass_receipt);
-    assert!(router.is_pilot_passed());
+    let (unman_ok, unman_reason) = fleetd::router::verify_pilot_receipt(&unmanifested_receipt);
+    assert!(!unman_ok);
+    assert!(unman_reason.contains("RECEIPT_NOT_IN_MANIFEST"));
 
-    // Tamper-resistance verification: Modifying PILOT_MIN_221_RECEIPT.json fails checksum against manifest
+    // 9b-2: Modifying PILOT_MIN_221_RECEIPT.json fails checksum against manifest
     let tampered_receipt = format!("{}/PILOT_MIN_221_RECEIPT.json", dir);
     fs::write(
         &tampered_receipt,
@@ -361,6 +399,7 @@ fn test_rust_acceptance_9_zero_trust_lease_and_gate_properties() {
             },
             "independent_qa_audit": {
                 "reviewer": "Codex (Independent QA)",
+                "reviewer_id": "3bc09df8-b112-4d8d-8d0c-519043c77030",
                 "verdict": "PASS"
             }
         }).to_string(),
@@ -368,6 +407,13 @@ fn test_rust_acceptance_9_zero_trust_lease_and_gate_properties() {
     let (tampered_ok, tampered_reason) = fleetd::router::verify_pilot_receipt(&tampered_receipt);
     assert!(!tampered_ok);
     assert!(tampered_reason.contains("RECEIPT_CHECKSUM_MISMATCH"));
+
+    // 9b-3: Manifest root authentication failure fails closed (Defect 4)
+    std::env::set_var("FLEETD_TRUSTED_MANIFEST_SHA256", "0000000000000000000000000000000000000000000000000000000000000000");
+    let (root_ok, root_reason) = fleetd::router::verify_pilot_receipt(receipt_path);
+    assert!(!root_ok);
+    assert!(root_reason.contains("MANIFEST_ROOT_UNAUTHENTICATED"));
+    std::env::remove_var("FLEETD_TRUSTED_MANIFEST_SHA256");
 
     // 9c: Commit SHA tracking in lease
     let ok = lease_mgr.acquire_lease("TASK-COMMIT", "agy", 3600, Some("deadbeef12345678901234567890123456789012")).unwrap();
@@ -629,4 +675,19 @@ async fn test_rust_acceptance_10_daemon_integration_webhook_and_vacuum() {
     }).to_string()).unwrap();
     q_router.refresh_quota_signals(&low_pool_q);
     assert_eq!(q_router.slot_quota_status.lock().unwrap().get("codex-local").unwrap(), "EXHAUSTED_TO_PROTECT_QA");
+
+    // 10h-2: Incomplete schema (empty {} or missing required fields) fails closed
+    let empty_q = format!("{}/empty.json", q_dir);
+    fs::write(&empty_q, b"{}").unwrap();
+    q_router.refresh_quota_signals(&empty_q);
+    assert_eq!(q_router.slot_quota_status.lock().unwrap().get("agy").unwrap(), "QUOTA_SOURCE_UNAVAILABLE");
+    assert_eq!(q_router.slot_quota_status.lock().unwrap().get("codex-local").unwrap(), "QUOTA_SOURCE_UNAVAILABLE");
+    let q_records3 = q_ledger.read_records().unwrap();
+    assert!(q_records3.iter().any(|r| r["event"] == "QUOTA_SIGNALS_SCHEMA_INCOMPLETE"));
+
+    let partial_q = format!("{}/partial.json", q_dir);
+    fs::write(&partial_q, serde_json::json!({ "agy": "OK" }).to_string()).unwrap();
+    q_router.refresh_quota_signals(&partial_q);
+    assert_eq!(q_router.slot_quota_status.lock().unwrap().get("agy").unwrap(), "QUOTA_SOURCE_UNAVAILABLE");
+    assert_eq!(q_router.slot_quota_status.lock().unwrap().get("codex-local").unwrap(), "QUOTA_SOURCE_UNAVAILABLE");
 }

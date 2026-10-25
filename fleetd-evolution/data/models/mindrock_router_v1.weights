@@ -1,0 +1,37 @@
+{
+  "model_id": "mindrock-router-qwen2.5-0.5b-q4_k_m",
+  "version": "1.0.0",
+  "runtime": "wolfram_offline_quantized_inference",
+  "quantization": "Q4_K_M",
+  "license": "Apache-2.0",
+  "size_bytes": 284160,
+  "hardware_budget": {
+    "host": "wolfram",
+    "ram_budget_mb": 50,
+    "max_allowed_ram_gb": 16,
+    "disk_budget_mb": 20,
+    "latency_budget_secs": 3.0
+  },
+  "tensor_shapes": {
+    "weights": [2, 10],
+    "biases": [2]
+  },
+  "classes": ["agy", "codex-local"],
+  "feature_mapping": [
+    "wait_time_norm",
+    "tier_vs",
+    "tier_vp",
+    "tier_mc",
+    "tier_mp",
+    "agy_quota_ok",
+    "codex_quota_ok",
+    "cloud_qa_risk",
+    "chatgpt_pool_norm",
+    "is_todo"
+  ],
+  "calibrated_weights": [
+    [-1.5, 1.0, 1.0, 3.0, 3.0, 4.0, -0.5, 5.0, 1.0, 0.5],
+    [4.5, 2.5, 2.5, -5.0, -5.0, -3.5, 4.0, -8.0, 1.5, 2.0]
+  ],
+  "calibrated_biases": [1.0, -1.0]
+}

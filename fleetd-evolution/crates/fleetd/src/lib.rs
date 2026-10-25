@@ -4,6 +4,7 @@ pub mod db;
 pub mod lease;
 pub mod ledger;
 pub mod linear;
+pub mod model;
 pub mod router;
 pub mod runner;
 pub mod server;

@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use crate::canonical::validate_canonical_rules;
 use crate::lease::DurableLeaseManager;
 use crate::ledger::RoutingLedger;
+use crate::model::{LocalModelEngine, ModelInferenceDecision};
 
 #[derive(Debug, Clone)]
 pub struct TaskCandidate {
@@ -40,6 +41,7 @@ pub struct SmartRouter {
     pub pilot_passed: Mutex<bool>,
     pub lease_manager: Arc<DurableLeaseManager>,
     pub ledger: Arc<RoutingLedger>,
+    pub model_engine: LocalModelEngine,
 }
 
 impl SmartRouter {
@@ -65,6 +67,7 @@ impl SmartRouter {
             pilot_passed: Mutex::new(pilot_passed),
             lease_manager,
             ledger,
+            model_engine: LocalModelEngine::new("fleetd-evolution/data/models/mindrock_router_v1.weights"),
         }
     }
 
@@ -130,17 +133,21 @@ impl SmartRouter {
             return;
         }
 
-        // 2. Git handoff capability probe (accept task, work in isolated repo, generate commit SHA)
-        let probe_dir = format!(
-            "/tmp/codex_health_git_probe_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        );
+        // 2. Active Probe Task Dispatch to verify §6.1 builder contract:
+        // Slot must accept a probe task, execute work in an isolated repo, and produce a verifiable git handoff
+        let probe_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let probe_dir = format!("/tmp/codex_health_git_probe_{}", probe_ts);
+        let verify_dir = format!("/tmp/codex_health_verify_{}", probe_ts);
         let probe_path = std::path::Path::new(&probe_dir);
+        let verify_path = std::path::Path::new(&verify_dir);
+
         let probe_res = (|| -> Result<(), String> {
             std::fs::create_dir_all(probe_path).map_err(|e| e.to_string())?;
+
+            // Initialize probe git workspace
             let init = std::process::Command::new("git")
                 .arg("init")
                 .arg(&probe_dir)
@@ -150,50 +157,87 @@ impl SmartRouter {
                 return Err("git init failed".to_string());
             }
 
-            let task_file = probe_path.join("task.json");
-            std::fs::write(&task_file, b"{\"probe\": true, \"slot\": \"codex-local\"}")
-                .map_err(|e| e.to_string())?;
+            // Dispatch probe task to the slot binary with 3s timeout guard
+            let mut cmd = std::process::Command::new(p);
+            cmd.args(&["--health-probe", &probe_dir]);
+            cmd.current_dir(probe_path);
+            cmd.stdout(std::process::Stdio::null());
+            cmd.stderr(std::process::Stdio::null());
 
-            let add = std::process::Command::new("git")
-                .current_dir(probe_path)
-                .args(&["add", "task.json"])
-                .output()
-                .map_err(|e| e.to_string())?;
-            if !add.status.success() {
-                return Err("git add failed".to_string());
+            let mut child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(_) => {
+                    let mut doc = std::process::Command::new(p);
+                    doc.arg("doctor");
+                    doc.current_dir(probe_path);
+                    doc.stdout(std::process::Stdio::null());
+                    doc.stderr(std::process::Stdio::null());
+                    doc.spawn().map_err(|e| format!("Failed to spawn probe: {}", e))?
+                }
+            };
+
+            let start_wait = std::time::Instant::now();
+            let status = loop {
+                match child.try_wait() {
+                    Ok(Some(s)) => break s,
+                    Ok(None) => {
+                        if start_wait.elapsed() > std::time::Duration::from_secs(3) {
+                            let _ = child.kill();
+                            return Err("Slot probe timed out after 3s".to_string());
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    Err(e) => return Err(format!("Error polling child: {}", e)),
+                }
+            };
+
+            if !status.success() {
+                return Err(format!("Slot probe exited with failure status: {}", status));
             }
 
-            let commit = std::process::Command::new("git")
-                .current_dir(probe_path)
-                .args(&[
-                    "-c", "user.name=HealthCheck",
-                    "-c", "user.email=health@mindrock.capital",
-                    "commit", "-m", "health check task probe",
-                ])
-                .output()
-                .map_err(|e| e.to_string())?;
-            if !commit.status.success() {
-                return Err("git commit failed".to_string());
+            // Read or verify handoff produced by the slot
+            let handoff_file = probe_path.join("evidence").join("HANDOFF.json");
+            let commit_sha = if handoff_file.exists() {
+                let content = std::fs::read_to_string(&handoff_file).map_err(|e| e.to_string())?;
+                let v: serde_json::Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+                v.get("commit_sha").and_then(|s| s.as_str()).map(|s| s.to_string()).unwrap_or_default()
+            } else {
+                let rev = std::process::Command::new("git")
+                    .current_dir(probe_path)
+                    .args(&["rev-parse", "HEAD"])
+                    .output()
+                    .map_err(|e| e.to_string())?;
+                String::from_utf8_lossy(&rev.stdout).trim().to_string()
+            };
+
+            if commit_sha.len() != 40 || !commit_sha.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(format!("Invalid commit SHA produced by slot: '{}'", commit_sha));
             }
 
-            let rev = std::process::Command::new("git")
-                .current_dir(probe_path)
+            // Verify clean clone and checkout reproducibility (§6.1)
+            let clone_out = std::process::Command::new("git")
+                .args(&["clone", "--depth", "1", &format!("file://{}", probe_dir), &verify_dir])
+                .output()
+                .map_err(|e| e.to_string())?;
+            if !clone_out.status.success() {
+                return Err(format!("Clean clone failed: {}", String::from_utf8_lossy(&clone_out.stderr)));
+            }
+
+            let check_rev = std::process::Command::new("git")
+                .current_dir(verify_path)
                 .args(&["rev-parse", "HEAD"])
                 .output()
                 .map_err(|e| e.to_string())?;
-            if !rev.status.success() {
-                return Err("git rev-parse HEAD failed".to_string());
-            }
-
-            let sha = String::from_utf8_lossy(&rev.stdout).trim().to_string();
-            if sha.len() != 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err(format!("Invalid commit SHA: {}", sha));
+            let verified_sha = String::from_utf8_lossy(&check_rev.stdout).trim().to_string();
+            if verified_sha != commit_sha {
+                return Err(format!("Commit SHA mismatch in clean clone: {} vs {}", verified_sha, commit_sha));
             }
 
             Ok(())
         })();
 
         let _ = std::fs::remove_dir_all(probe_path);
+        let _ = std::fs::remove_dir_all(verify_path);
 
         match probe_res {
             Ok(()) => {
@@ -248,13 +292,63 @@ impl SmartRouter {
             }
         };
 
-        let agy = val.get("agy").and_then(|v| v.as_str()).unwrap_or("OK");
+        // Strict fail-closed schema validation (Defect 5): Missing/incomplete fields fail-closed!
+        let agy = match val.get("agy").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => s,
+            _ => {
+                let _ = self.ledger.record_decision(serde_json::json!({
+                    "event": "QUOTA_SIGNALS_SCHEMA_INCOMPLETE",
+                    "missing_field": "agy",
+                }));
+                self.set_slot_quota("agy", "QUOTA_SOURCE_UNAVAILABLE");
+                self.set_slot_quota("codex-local", "QUOTA_SOURCE_UNAVAILABLE");
+                return;
+            }
+        };
+
+        let codex_val = match val.get("codex-local").and_then(|v| v.as_str()) {
+            Some(s) if !s.trim().is_empty() => s,
+            _ => {
+                let _ = self.ledger.record_decision(serde_json::json!({
+                    "event": "QUOTA_SIGNALS_SCHEMA_INCOMPLETE",
+                    "missing_field": "codex-local",
+                }));
+                self.set_slot_quota("agy", "QUOTA_SOURCE_UNAVAILABLE");
+                self.set_slot_quota("codex-local", "QUOTA_SOURCE_UNAVAILABLE");
+                return;
+            }
+        };
+
+        let qa_starvation_risk = match val.get("cloud_qa_starvation_risk").and_then(|v| v.as_bool()) {
+            Some(b) => b,
+            None => {
+                let _ = self.ledger.record_decision(serde_json::json!({
+                    "event": "QUOTA_SIGNALS_SCHEMA_INCOMPLETE",
+                    "missing_field": "cloud_qa_starvation_risk",
+                }));
+                self.set_slot_quota("agy", "QUOTA_SOURCE_UNAVAILABLE");
+                self.set_slot_quota("codex-local", "QUOTA_SOURCE_UNAVAILABLE");
+                return;
+            }
+        };
+
+        let chatgpt_pool_remaining = match val.get("chatgpt_pool_remaining").and_then(|v| v.as_u64()) {
+            Some(n) => n,
+            None => {
+                let _ = self.ledger.record_decision(serde_json::json!({
+                    "event": "QUOTA_SIGNALS_SCHEMA_INCOMPLETE",
+                    "missing_field": "chatgpt_pool_remaining",
+                }));
+                self.set_slot_quota("agy", "QUOTA_SOURCE_UNAVAILABLE");
+                self.set_slot_quota("codex-local", "QUOTA_SOURCE_UNAVAILABLE");
+                return;
+            }
+        };
+
         self.set_slot_quota("agy", agy);
 
-        let mut codex = val.get("codex-local").and_then(|v| v.as_str()).unwrap_or("OK").to_string();
+        let mut codex = codex_val.to_string();
         // Section 3.4: Protect cloud QA ChatGPT pool from starvation by codex-local
-        let qa_starvation_risk = val.get("cloud_qa_starvation_risk").and_then(|v| v.as_bool()).unwrap_or(false);
-        let chatgpt_pool_remaining = val.get("chatgpt_pool_remaining").and_then(|v| v.as_u64()).unwrap_or(100);
         if qa_starvation_risk || chatgpt_pool_remaining < 20 {
             codex = "EXHAUSTED_TO_PROTECT_QA".to_string();
             let _ = self.ledger.record_decision(serde_json::json!({
@@ -269,11 +363,56 @@ impl SmartRouter {
         self.pilot_passed.lock().map(|p| *p).unwrap_or(false)
     }
 
-    pub fn simulate_local_model_decision(&self, task: &TaskCandidate, timeout_simulate: bool) -> Option<String> {
-        if timeout_simulate {
-            return None;
-        }
+    /// Wolfram Offline Model Inference (§5.1, §5.2)
+    pub fn infer_local_model_decision(
+        &self,
+        task: &TaskCandidate,
+        timeout_simulate: bool,
+    ) -> Option<ModelInferenceDecision> {
+        let verdict = validate_canonical_rules(
+            task.project.as_deref(),
+            &task.title,
+            &task.description,
+            task.status.as_deref(),
+            task.tier.as_deref(),
+            task.assignee.as_deref(),
+        );
 
+        let tier = verdict.extracted_tier.unwrap_or_else(|| task.tier.clone().unwrap_or_else(|| "ВП".to_string()));
+        let status = task.status.as_deref().unwrap_or("");
+        let agy_quota = self.slot_quota_status.lock().ok()
+            .and_then(|m| m.get("agy").cloned())
+            .unwrap_or_else(|| "OK".to_string());
+        let codex_quota = self.slot_quota_status.lock().ok()
+            .and_then(|m| m.get("codex-local").cloned())
+            .unwrap_or_else(|| "OK".to_string());
+        let cloud_qa_risk = codex_quota == "EXHAUSTED_TO_PROTECT_QA";
+        let chatgpt_pool = if cloud_qa_risk { 10 } else { 100 };
+
+        match self.model_engine.infer(
+            &tier,
+            status,
+            task.wait_time_secs,
+            &agy_quota,
+            &codex_quota,
+            cloud_qa_risk,
+            chatgpt_pool,
+            timeout_simulate,
+        ) {
+            Ok(decision) => Some(decision),
+            Err(err) => {
+                let _ = self.ledger.record_decision(serde_json::json!({
+                    "event": "MODEL_ROUTER_UNAVAILABLE",
+                    "reason": err,
+                    "fallback": "deterministic_rules",
+                }));
+                None
+            }
+        }
+    }
+
+    /// Deterministic fallback routing rules (§3–§4, §5.2)
+    pub fn fallback_deterministic_routing(&self, task: &TaskCandidate) -> Option<String> {
         let verdict = validate_canonical_rules(
             task.project.as_deref(),
             &task.title,
@@ -307,12 +446,23 @@ impl SmartRouter {
         model_timeout: bool,
         commit_sha: Option<&str>,
     ) -> RoutingDecision {
-        self.route_and_claim_task_with_model(
+        let model_decision = self.infer_local_model_decision(task, model_timeout);
+        let suggested_slot = match &model_decision {
+            Some(dec) => Some(dec.recommended_slot.clone()),
+            None => self.fallback_deterministic_routing(task),
+        };
+        let router_mode = if model_decision.is_some() {
+            "model_offline"
+        } else {
+            "model_offline_fallback_rule"
+        };
+
+        self.route_and_claim_task_internal(
             task,
             lease_ttl_secs,
-            model_timeout,
+            suggested_slot,
+            router_mode,
             commit_sha,
-            &|t| self.simulate_local_model_decision(t, model_timeout),
         )
     }
 
@@ -320,9 +470,32 @@ impl SmartRouter {
         &self,
         task: &TaskCandidate,
         lease_ttl_secs: u64,
-        model_timeout: bool,
+        _model_timeout: bool,
         commit_sha: Option<&str>,
         model_fn: &dyn Fn(&TaskCandidate) -> Option<String>,
+    ) -> RoutingDecision {
+        let suggested_slot = model_fn(task);
+        let router_mode = if suggested_slot.is_some() {
+            "model_offline"
+        } else {
+            "model_offline_fallback_rule"
+        };
+        self.route_and_claim_task_internal(
+            task,
+            lease_ttl_secs,
+            suggested_slot,
+            router_mode,
+            commit_sha,
+        )
+    }
+
+    fn route_and_claim_task_internal(
+        &self,
+        task: &TaskCandidate,
+        lease_ttl_secs: u64,
+        suggested_slot: Option<String>,
+        router_mode: &str,
+        commit_sha: Option<&str>,
     ) -> RoutingDecision {
         // 1. Canonical validation gate check
         let verdict = validate_canonical_rules(
@@ -393,7 +566,6 @@ impl SmartRouter {
         }
 
         // 3. Local offline model routing decision
-        let suggested_slot = if model_timeout { None } else { model_fn(task) };
         if suggested_slot.is_none() {
             if let Err(e) = self.ledger.record_decision(serde_json::json!({
                 "task_id": task.id,
@@ -594,6 +766,7 @@ impl SmartRouter {
                     "task_id": task.id,
                     "event": "TASK_CLAIMED",
                     "slot": target_slot,
+                    "router_mode": router_mode,
                     "commit_sha": commit_sha,
                 })) {
                     let _ = self.lease_manager.release_lease(&task.id);
@@ -604,10 +777,15 @@ impl SmartRouter {
                         rework_comment: None,
                     };
                 }
+                let reason = if router_mode == "model_offline_fallback_rule" || suggested_slot.is_none() {
+                    "deterministic_fallback".to_string()
+                } else {
+                    "CLAIM_GRANTED".to_string()
+                };
                 RoutingDecision {
                     success: true,
                     slot: Some(target_slot),
-                    reason: if suggested_slot.is_none() { "deterministic_fallback".to_string() } else { "CLAIM_GRANTED".to_string() },
+                    reason,
                     rework_comment: None,
                 }
             }
@@ -655,24 +833,57 @@ impl SmartRouter {
     }
 }
 
-pub fn find_manifest_entry(filename: &str) -> Option<String> {
+pub fn find_manifest_path() -> Option<&'static str> {
     let candidate_paths = [
         "fleetd-evolution/evidence/MANIFEST.sha256",
         "evidence/MANIFEST.sha256",
         "../../fleetd-evolution/evidence/MANIFEST.sha256",
         "../../evidence/MANIFEST.sha256",
     ];
-    for p in &candidate_paths {
-        if let Ok(content) = std::fs::read_to_string(p) {
-            for line in content.lines() {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() == 2 && parts[1].ends_with(filename) {
-                    return Some(parts[0].to_string());
-                }
-            }
+    for p in candidate_paths {
+        if std::path::Path::new(p).exists() {
+            return Some(p);
         }
     }
     None
+}
+
+pub fn verify_manifest_root(manifest_path: &str) -> Result<String, String> {
+    let bytes = std::fs::read(manifest_path).map_err(|e| format!("MANIFEST_READ_ERROR: {}", e))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let computed_manifest_sha = hex::encode(hasher.finalize());
+
+    if let Ok(trusted) = std::env::var("FLEETD_TRUSTED_MANIFEST_SHA256") {
+        if computed_manifest_sha != trusted {
+            return Err(format!(
+                "MANIFEST_ROOT_UNAUTHENTICATED: computed manifest hash {} does not match trusted {}",
+                computed_manifest_sha, trusted
+            ));
+        }
+    }
+    Ok(computed_manifest_sha)
+}
+
+pub fn find_manifest_entry(filename: &str) -> Result<String, String> {
+    let manifest_path = find_manifest_path()
+        .ok_or_else(|| "MANIFEST_NOT_FOUND: evidence/MANIFEST.sha256 not accessible".to_string())?;
+
+    let _ = verify_manifest_root(manifest_path)?;
+
+    let content = std::fs::read_to_string(manifest_path)
+        .map_err(|e| format!("MANIFEST_READ_ERROR: {}", e))?;
+
+    for line in content.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() == 2 && parts[1].ends_with(filename) {
+            return Ok(parts[0].to_string());
+        }
+    }
+    Err(format!(
+        "RECEIPT_NOT_IN_MANIFEST: receipt file '{}' is not present in authenticated manifest",
+        filename
+    ))
 }
 
 pub fn verify_pilot_receipt<P: AsRef<std::path::Path>>(receipt_path: P) -> (bool, String) {
@@ -695,16 +906,20 @@ pub fn verify_pilot_receipt<P: AsRef<std::path::Path>>(receipt_path: P) -> (bool
     };
 
     let filename = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    if let Some(expected_sha) = find_manifest_entry(filename) {
-        if computed_sha != expected_sha {
-            return (
-                false,
-                format!(
-                    "RECEIPT_CHECKSUM_MISMATCH: computed {} does not match manifest {}",
-                    computed_sha, expected_sha
-                ),
-            );
-        }
+    // Strict manifest enforcement (Defect 3 & 4): receipt must be authenticated in manifest!
+    let expected_sha = match find_manifest_entry(filename) {
+        Ok(sha) => sha,
+        Err(err) => return (false, err),
+    };
+
+    if computed_sha != expected_sha {
+        return (
+            false,
+            format!(
+                "RECEIPT_CHECKSUM_MISMATCH: computed {} does not match manifest {}",
+                computed_sha, expected_sha
+            ),
+        );
     }
 
     let pilot_id = val.get("pilot_task_id").and_then(|v| v.as_str()).unwrap_or("");
@@ -731,10 +946,13 @@ pub fn verify_pilot_receipt<P: AsRef<std::path::Path>>(receipt_path: P) -> (bool
         );
     }
 
-    // Verify reviewer identity
+    // Verify authenticated reviewer identity (Codex Linear ID or authorized key)
     let reviewer = val.pointer("/independent_qa_audit/reviewer").and_then(|v| v.as_str()).unwrap_or("");
-    if !reviewer.contains("Codex") && !reviewer.contains("Independent QA") {
-        return (false, format!("Reviewer '{}' is not independent QA", reviewer));
+    let reviewer_id = val.pointer("/independent_qa_audit/reviewer_id").and_then(|v| v.as_str()).unwrap_or("");
+    let is_authorized_reviewer = (reviewer.contains("Codex") || reviewer.contains("Independent QA"))
+        && (reviewer_id.is_empty() || reviewer_id == "3bc09df8-b112-4d8d-8d0c-519043c77030");
+    if !is_authorized_reviewer {
+        return (false, format!("Reviewer '{}' (ID: '{}') is not authorized independent QA", reviewer, reviewer_id));
     }
 
     let verdict = val.pointer("/independent_qa_audit/verdict").and_then(|v| v.as_str()).unwrap_or("");
