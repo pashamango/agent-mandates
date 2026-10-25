@@ -1,0 +1,27 @@
+{
+  "pilot_task_id": "MIN-221",
+  "project": "Project Collatz",
+  "title": "Collatz v0.1.0 — M3: CacheCheck (S, τ, линейный чекер пути)",
+  "tier": "ВП",
+  "assigned_slot": "codex-local",
+  "git_coordinates": {
+    "repo_url": "https://github.com/pashamango/math.git",
+    "branch": "collatz-v0.1.0-m3",
+    "commit_sha": "16590a7574b188225896cdf99268bc476cbe18a3"
+  },
+  "independent_qa_audit": {
+    "reviewer": "Codex (Independent QA)",
+    "timestamp": "2026-10-25T09:29:51.035Z",
+    "verdict": "FAIL",
+    "summary": "CacheCheck.lean:132-137 stepsCount is a tautology; does not prove runtime complexity bound O(|w|) of recursive verifyPath evaluator",
+    "blockers": [
+      "stepsCount p = p.length (rfl) does not count recursive steps or branch evaluation",
+      "Formulations 'exactly O(|w|)' violate big-O definition given early exit on step 1"
+    ]
+  },
+  "gate_enforcement": {
+    "rule": "§6.3 Fallback на всю очередь НЕ включается до пилота с независимым QA PASS",
+    "status": "FAIL_CLOSED_BLOCKED",
+    "fallback_enabled": false
+  }
+}

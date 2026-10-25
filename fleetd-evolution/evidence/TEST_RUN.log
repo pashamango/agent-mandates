@@ -1,0 +1,23 @@
+test_acceptance_1_task_without_project (fleetd-evolution.tests.test_fleetd_vnext.TestFleetdVNextAcceptance.test_acceptance_1_task_without_project)
+1. Задача без проекта → REWORK к PM, билдеру не выдана, в ledger — запись. ... ok
+test_acceptance_2_task_without_tier (fleetd-evolution.tests.test_fleetd_vnext.TestFleetdVNextAcceptance.test_acceptance_2_task_without_tier)
+2. Задача без тира → REWORK к PM, билдеру не выдана. ... ok
+test_acceptance_3_task_mp_submitted_frozen_and_status_check (fleetd-evolution.tests.test_fleetd_vnext.TestFleetdVNextAcceptance.test_acceptance_3_task_mp_submitted_frozen_and_status_check)
+3. Задача МП (поданная заявка) → билдеру не выдана. Задача в статусе Done также отклоняется. ... ok
+test_acceptance_4_fallback_triggers_time_and_quota (fleetd-evolution.tests.test_fleetd_vnext.TestFleetdVNextAcceptance.test_acceptance_4_fallback_triggers_time_and_quota)
+4. Fallback-захват codex-local: а) по времени > 2ч; б) по сигналу исчерпания квоты agy. ... ok
+test_acceptance_5_double_claim_simulation_and_durable_lease (fleetd-evolution.tests.test_fleetd_vnext.TestFleetdVNextAcceptance.test_acceptance_5_double_claim_simulation_and_durable_lease)
+5. Симуляция двойного захвата → только один lease, межпроцессная защита, 2-й захват отклонён. ... ok
+test_acceptance_6_quota_exhaustion_fail_closed (fleetd-evolution.tests.test_fleetd_vnext.TestFleetdVNextAcceptance.test_acceptance_6_quota_exhaustion_fail_closed)
+6. Сигнал исчерпания квоты слота → захваты слота остановлены, нагрузка молча не перекинута. ... ok
+test_acceptance_7_local_model_active_decision_and_timeout_fallback (fleetd-evolution.tests.test_fleetd_vnext.TestFleetdVNextAcceptance.test_acceptance_7_local_model_active_decision_and_timeout_fallback)
+7. Модель активно определяет слот; при недоступности -> детерминированный fallback, инцидент в ledger. ... ok
+test_acceptance_8_historical_incident_metrics_and_rollback (fleetd-evolution.tests.test_fleetd_vnext.TestFleetdVNextAcceptance.test_acceptance_8_historical_incident_metrics_and_rollback)
+8. Новая политика маршрутизации на исторических инцидентах даёт не хуже базовой, иначе rollback. ... ok
+test_acceptance_9_zero_trust_git_handoff_pilot_and_manifest (fleetd-evolution.tests.test_fleetd_vnext.TestFleetdVNextAcceptance.test_acceptance_9_zero_trust_git_handoff_pilot_and_manifest)
+9. Zero-trust git handoff: clean-clone verify, fail-closed health check, pilot gate, manifest integrity. ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 4.032s
+
+OK

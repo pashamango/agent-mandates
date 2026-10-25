@@ -4,15 +4,17 @@ Enforces deterministic pre-dispatch rules for incoming Linear tasks:
 1. Linear project is mandatory.
 2. Tier (Tier: ВС/ВП/МС/МП) is mandatory.
 3. Submitted applications (MP tier post-submission) are frozen.
-4. Builder markers must be matched with strict word boundaries.
+4. Lane marker discipline and codex-cloud isolation contract:
+   - codex-cloud lane requires strictly: assignee is Codex + @Codex mention.
+   - Ambiguous textual markers (e.g. 'Builder: codex-cloud' without contract) return REWORK to PM.
+5. Task status check: only 'Todo' or 'Backlog' can be dispatched.
 """
 
 import re
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Optional
 
-BUILDER_REGEX = re.compile(r"\bBuilder:\s*(agy|codex)\b", re.IGNORECASE)
-CLOUD_BUILDER_REGEX = re.compile(r"\bBuilder:\s*codex-cloud\b", re.IGNORECASE)
 TIER_REGEX = re.compile(r"\bTier:\s*(ВС|ВП|МС|МП)\b", re.IGNORECASE)
+RAW_BUILDER_REGEX = re.compile(r"Builder:\s*([^\s\n\r]+)", re.IGNORECASE)
 
 
 class CanonicalVerdict:
@@ -34,6 +36,23 @@ def validate_canonical_rules(task: Dict[str, Any]) -> CanonicalVerdict:
     Validates task against canonical rules before dispatching to any builder.
     Returns CanonicalVerdict.
     """
+    # 0. Status check: tasks with status 'Done', 'Canceled', etc. are not dispatchable
+    status = task.get("status")
+    if status:
+        normalized_status = status.strip().lower()
+        if normalized_status in {"done", "completed", "closed"}:
+            return CanonicalVerdict(
+                passed=False,
+                reason="ALREADY_DONE",
+                rework_comment="@PM REWORK: Задача уже находится в статусе Done. Повторный захват запрещён.",
+            )
+        if normalized_status not in {"todo", "backlog"}:
+            return CanonicalVerdict(
+                passed=False,
+                reason=f"INVALID_STATUS_{status.upper()}",
+                rework_comment=f"@PM REWORK: Задача в статусе '{status}' не готова к выдаче. Допустимы только 'Todo' или 'Backlog'.",
+            )
+
     # 1. Project mandatory check
     project = task.get("project")
     if not project or (isinstance(project, str) and not project.strip()):
@@ -78,20 +97,47 @@ def validate_canonical_rules(task: Dict[str, Any]) -> CanonicalVerdict:
                 rework_comment="@PM REWORK: Задача тира МП уже отправлена (submitted). Дальнейшая полировка заморожена для сохранения квоты билдера.",
             )
 
-    # 4. Marker discipline check (word boundaries & cloud lane isolation)
-    if CLOUD_BUILDER_REGEX.search(combined_text):
-        # Explicit codex-cloud task — local fleetd must not touch it
+    # 4. Codex-cloud isolation contract & Marker discipline (§3.1, §4)
+    # Contract: codex-cloud is strictly identified by assignee (Codex user) + @Codex mention.
+    assignee = str(task.get("assignee") or "").strip()
+    assignee_id = str(task.get("assignee_id") or task.get("assigneeId") or "").strip()
+    is_codex_assignee = (
+        assignee.lower() == "codex"
+        or assignee_id == "3bc09df8-b112-4d8d-8d0c-519043c77030"
+    )
+    has_codex_mention = bool(re.search(r"@codex\b", combined_text, re.IGNORECASE))
+
+    # Check for text marker "Builder: codex-cloud"
+    has_cloud_builder_text = bool(re.search(r"\bBuilder:\s*codex-cloud\b", combined_text, re.IGNORECASE))
+
+    if is_codex_assignee and has_codex_mention:
+        # Canonical codex-cloud lane: local fleetd must NOT claim it
         return CanonicalVerdict(
             passed=False,
             reason="CODEX_CLOUD_LANE",
-            rework_comment=None,  # Not a rework, just not for local fleetd
+            rework_comment=None,  # Not an error; task belongs strictly to cloud lane
         )
 
-    # Check for ambiguous marker formats like "Builder:codex-something"
-    raw_builder_matches = re.findall(r"Builder:\s*([^\s\n\r]+)", combined_text, re.IGNORECASE)
+    if has_cloud_builder_text:
+        # Ambiguous textual marker without formal assignee+mention contract
+        return CanonicalVerdict(
+            passed=False,
+            reason="AMBIGUOUS_BUILDER_MARKER",
+            rework_comment="@PM REWORK: Неоднозначная маркировка 'Builder: codex-cloud'. Облачные задачи Codex должны назначаться строго через assignee: Codex и @Codex.",
+        )
+
+    if is_codex_assignee and not has_codex_mention:
+        return CanonicalVerdict(
+            passed=False,
+            reason="AMBIGUOUS_BUILDER_MARKER",
+            rework_comment="@PM REWORK: Задача назначена на Codex, но отсутствует обязательное упоминание @Codex в тикете.",
+        )
+
+    # Check for other ambiguous builder markers like "Builder: codex-something"
+    raw_builder_matches = RAW_BUILDER_REGEX.findall(combined_text)
     for m in raw_builder_matches:
         cleaned = m.strip("[](),.")
-        if cleaned.lower() not in {"agy", "codex", "codex-cloud", "gemini"}:
+        if cleaned.lower() not in {"agy", "codex", "gemini"}:
             return CanonicalVerdict(
                 passed=False,
                 reason="AMBIGUOUS_BUILDER_MARKER",

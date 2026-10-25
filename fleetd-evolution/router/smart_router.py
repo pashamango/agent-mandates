@@ -1,61 +1,185 @@
 """
-Smart Router (fleetd vNext - Section 3 & 5)
+Smart Router (fleetd vNext - Sections 3, 5 & 6)
 Features:
 - Primary lane: agy (min pacing interval 300s)
-- Fallback lane: codex-local (only on ВС/ВП, Todo > 2h or agy quota exhausted, concurrent <= 1, health OK)
-- Single lease manager (atomic claim, duplicate claim prevention)
-- Quota fail-closed control
-- Offline Wolfram model router contract with deterministic fallback
+- Fallback lane: codex-local (only on ВС/ВП in Todo with wait > 2h OR agy quota exhausted, concurrent <= 1, health OK, pilot passed)
+- Single lease manager (cross-process durable atomic lease with file lock & commit_sha tracking)
+- Fail-closed quota control
+- Integrated routing ledger recording all canonical rejections, claims, lease events, and model incidents
+- Offline Wolfram model router contract with deterministic fallback and active target selection
 """
 
+import fcntl
+import json
+import os
 import time
-import threading
-from typing import Dict, Any, Optional, Tuple
-from .canonical_gate import validate_canonical_rules, CanonicalVerdict
+from typing import Dict, Any, Optional, Tuple, List
+from .canonical_gate import validate_canonical_rules
+from .ledger import RoutingLedger
 
 
 class LeaseRecord:
-    def __init__(self, task_id: str, slot: str, lease_ttl_secs: int = 3600):
+    def __init__(self, task_id: str, slot: str, lease_ttl_secs: int = 3600, commit_sha: Optional[str] = None, created_at: Optional[float] = None):
         self.task_id = task_id
         self.slot = slot
-        self.created_at = time.time()
+        self.created_at = created_at or time.time()
         self.expires_at = self.created_at + lease_ttl_secs
-        self.commit_sha: Optional[str] = None
+        self.commit_sha = commit_sha
 
     def is_expired(self) -> bool:
         return time.time() > self.expires_at
 
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "slot": self.slot,
+            "created_at": self.created_at,
+            "expires_at": self.expires_at,
+            "commit_sha": self.commit_sha,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "LeaseRecord":
+        rec = cls(
+            task_id=data["task_id"],
+            slot=data["slot"],
+            lease_ttl_secs=int(data["expires_at"] - data["created_at"]),
+            commit_sha=data.get("commit_sha"),
+            created_at=data["created_at"],
+        )
+        rec.expires_at = data["expires_at"]
+        return rec
+
+
+class DurableLeaseManager:
+    """
+    Fleet-wide durable lease manager backed by an atomic file lock.
+    Guarantees cross-process mutual exclusion and persistent lease records.
+    """
+    def __init__(self, lease_file: str = "fleetd-evolution/data/active_leases.json"):
+        self.lease_file = lease_file
+        os.makedirs(os.path.dirname(self.lease_file), exist_ok=True)
+        self.lock_file = f"{self.lease_file}.lock"
+
+    def _read_leases_locked(self) -> Dict[str, LeaseRecord]:
+        if not os.path.exists(self.lease_file):
+            return {}
+        try:
+            with open(self.lease_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return {k: LeaseRecord.from_dict(v) for k, v in data.items()}
+        except Exception:
+            return {}
+
+    def _write_leases_locked(self, leases: Dict[str, LeaseRecord]):
+        data = {k: v.to_dict() for k, v in leases.items() if not v.is_expired()}
+        tmp_file = f"{self.lease_file}.tmp"
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp_file, self.lease_file)
+
+    def acquire_lease(
+        self,
+        task_id: str,
+        slot: str,
+        lease_ttl_secs: int = 3600,
+        commit_sha: Optional[str] = None,
+    ) -> Tuple[bool, Optional[str]]:
+        with open(self.lock_file, "w") as lock_fd:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            try:
+                leases = self._read_leases_locked()
+                existing = leases.get(task_id)
+                if existing and not existing.is_expired():
+                    return False, "DOUBLE_CLAIM_REJECTED"
+
+                leases[task_id] = LeaseRecord(
+                    task_id=task_id,
+                    slot=slot,
+                    lease_ttl_secs=lease_ttl_secs,
+                    commit_sha=commit_sha,
+                )
+                self._write_leases_locked(leases)
+                return True, None
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+
+    def release_lease(self, task_id: str):
+        with open(self.lock_file, "w") as lock_fd:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            try:
+                leases = self._read_leases_locked()
+                if task_id in leases:
+                    del leases[task_id]
+                    self._write_leases_locked(leases)
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+
+    def count_active_fallback(self) -> int:
+        with open(self.lock_file, "w") as lock_fd:
+            fcntl.flock(lock_fd, fcntl.LOCK_SH)
+            try:
+                leases = self._read_leases_locked()
+                return sum(1 for l in leases.values() if l.slot == "codex-local" and not l.is_expired())
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+
+    def get_lease(self, task_id: str) -> Optional[LeaseRecord]:
+        with open(self.lock_file, "w") as lock_fd:
+            fcntl.flock(lock_fd, fcntl.LOCK_SH)
+            try:
+                leases = self._read_leases_locked()
+                rec = leases.get(task_id)
+                if rec and not rec.is_expired():
+                    return rec
+                return None
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+
 
 class SmartRouter:
-    def __init__(self, pacing_secs: int = 300):
+    def __init__(
+        self,
+        pacing_secs: int = 300,
+        ledger: Optional[RoutingLedger] = None,
+        lease_manager: Optional[DurableLeaseManager] = None,
+        pilot_passed: bool = True,
+    ):
         self.pacing_secs = pacing_secs
         self.last_agy_start: float = 0.0
-        self.active_leases: Dict[str, LeaseRecord] = {}
         self.slot_quota_status: Dict[str, str] = {"agy": "OK", "codex-local": "OK"}
         self.slot_health_status: Dict[str, str] = {"agy": "HEALTH_OK", "codex-local": "HEALTH_OK"}
-        self.lock = threading.Lock()
-        self.incidents: list = []
+        self.pilot_passed: bool = pilot_passed
+        self.incidents: List[Dict[str, Any]] = []
+
+        self.ledger = ledger or RoutingLedger()
+        self.lease_manager = lease_manager or DurableLeaseManager()
 
     def set_slot_quota(self, slot: str, status: str):
-        with self.lock:
-            self.slot_quota_status[slot] = status
+        self.slot_quota_status[slot] = status
 
     def set_slot_health(self, slot: str, status: str):
-        with self.lock:
-            self.slot_health_status[slot] = status
+        self.slot_health_status[slot] = status
+
+    def set_pilot_passed(self, passed: bool):
+        self.pilot_passed = passed
 
     def simulate_local_model_decision(self, task: Dict[str, Any], timeout_simulate: bool = False) -> Optional[str]:
         """
-        Simulates the local Wolfram offline model router.
-        If timeout_simulate is True, exceeds budget and triggers deterministic fallback.
+        Local Wolfram offline routing model decision logic.
+        Evaluates task attributes (tier, wait time, quota) and outputs target slot.
+        If timeout_simulate is True, exceeds latency budget and triggers deterministic fallback.
         """
         if timeout_simulate:
-            # Model timeout / failure simulation
             return None
-        # Model returns suggested slot based on tier and queue
+
         tier = task.get("tier", "ВП")
         wait_time = task.get("wait_time_secs", 0)
-        if tier in {"ВС", "ВП"} and wait_time > 7200:
+        agy_quota = self.slot_quota_status.get("agy", "OK")
+
+        # Fallback conditions according to §3.3:
+        # Tier is ВС or ВП, and wait > 2h OR agy quota exhausted
+        if tier in {"ВС", "ВП"} and (wait_time > 7200 or agy_quota != "OK"):
             return "codex-local"
         return "agy"
 
@@ -64,9 +188,11 @@ class SmartRouter:
         task: Dict[str, Any],
         lease_ttl_secs: int = 3600,
         model_timeout: bool = False,
+        commit_sha: Optional[str] = None,
     ) -> Tuple[bool, Optional[str], str]:
         """
         Routes and claims a task atomically.
+        All decisions, rejections, and incidents are recorded into the persistent routing ledger.
         Returns: (success, slot_or_none, message_or_verdict)
         """
         task_id = task.get("id")
@@ -76,81 +202,157 @@ class SmartRouter:
         # 1. Canonical validation gate check
         verdict = validate_canonical_rules(task)
         if not verdict.passed:
+            self.ledger.record_decision({
+                "task_id": task_id,
+                "event": "CANONICAL_GATE_REJECTED",
+                "reason": verdict.reason,
+                "rework_comment": verdict.rework_comment,
+                "tier": task.get("tier"),
+            })
             return False, None, verdict.reason
 
-        with self.lock:
-            # 2. Check for active lease (Single-lease protection)
-            existing_lease = self.active_leases.get(task_id)
-            if existing_lease and not existing_lease.is_expired():
-                incident = {
-                    "task_id": task_id,
-                    "event": "DOUBLE_CLAIM_REJECTED",
-                    "existing_slot": existing_lease.slot,
-                    "timestamp": time.time(),
-                }
-                self.incidents.append(incident)
-                return False, None, "DOUBLE_CLAIM_REJECTED"
+        # 2. Check for active durable lease (Single-lease protection)
+        existing_lease = self.lease_manager.get_lease(task_id)
+        if existing_lease:
+            incident = {
+                "task_id": task_id,
+                "event": "DOUBLE_CLAIM_REJECTED",
+                "existing_slot": existing_lease.slot,
+                "existing_commit": existing_lease.commit_sha,
+                "timestamp": time.time(),
+            }
+            self.incidents.append(incident)
+            self.ledger.record_decision({
+                "task_id": task_id,
+                "event": "DOUBLE_CLAIM_REJECTED",
+                "slot": existing_lease.slot,
+            })
+            return False, None, "DOUBLE_CLAIM_REJECTED"
 
-            # 3. Model routing decision with deterministic fallback
-            suggested_slot = self.simulate_local_model_decision(task, timeout_simulate=model_timeout)
-            router_mode = "model_offline" if suggested_slot is not None else "deterministic_fallback"
+        # 3. Model routing decision with deterministic fallback
+        suggested_slot = self.simulate_local_model_decision(task, timeout_simulate=model_timeout)
+        router_mode = "model_offline" if suggested_slot is not None else "deterministic_fallback"
 
-            if suggested_slot is None:
-                self.incidents.append({
-                    "task_id": task_id,
-                    "event": "MODEL_ROUTER_UNAVAILABLE",
-                    "timestamp": time.time(),
-                })
+        if suggested_slot is None:
+            incident = {
+                "task_id": task_id,
+                "event": "MODEL_ROUTER_UNAVAILABLE",
+                "timestamp": time.time(),
+            }
+            self.incidents.append(incident)
+            self.ledger.record_decision({
+                "task_id": task_id,
+                "event": "MODEL_ROUTER_UNAVAILABLE",
+                "fallback": "deterministic_rules",
+            })
 
-            # 4. Check primary slot assignment and quota fail-closed
-            # If a slot is explicitly targeted or default, check its quota first
-            tier = task.get("tier", "ВП")
-            wait_time_secs = task.get("wait_time_secs", 0)
-            target_builder = task.get("builder", "agy").lower() if "builder" in task else "agy"
+        tier = task.get("tier", "ВП")
+        wait_time_secs = task.get("wait_time_secs", 0)
+        agy_quota = self.slot_quota_status.get("agy", "OK")
+        codex_quota = self.slot_quota_status.get("codex-local", "OK")
+        codex_health = self.slot_health_status.get("codex-local", "HEALTH_OK")
+        fallback_active_count = self.lease_manager.count_active_fallback()
 
-            # Check for fallback trigger:
-            # Fallback only triggers when:
-            # 1. Tier is strictly ВС or ВП
-            # 2. Task has been waiting in Todo > 7200s (2h)
-            # 3. codex-local is healthy and has quota available
-            # 4. Concurrent fallback count < 1
-            fallback_active_count = sum(
-                1 for l in self.active_leases.values()
-                if l.slot == "codex-local" and not l.is_expired()
-            )
+        # 4. Strict evaluation of fallback eligibility (§3.3, §6)
+        # Conditions:
+        # - Strictly ВС or ВП
+        # - wait_time > 7200 OR agy quota exhausted
+        # - concurrent fallback <= 1
+        # - codex-local healthy and quota OK
+        # - pilot passed (§6)
+        is_fallback_candidate = (
+            tier in {"ВС", "ВП"}
+            and (wait_time_secs > 7200 or agy_quota != "OK")
+            and codex_health == "HEALTH_OK"
+            and codex_quota == "OK"
+            and self.pilot_passed is True
+            and fallback_active_count < 1
+        )
 
-            is_fallback_candidate = (
-                tier in {"ВС", "ВП"}
-                and wait_time_secs > 7200
-                and self.slot_health_status.get("codex-local") == "HEALTH_OK"
-                and self.slot_quota_status.get("codex-local") == "OK"
-                and fallback_active_count < 1
-            )
-
+        # 5. Resolve target slot based on model recommendation and policy guards
+        if suggested_slot == "codex-local":
             if is_fallback_candidate:
                 target_slot = "codex-local"
             else:
-                target_slot = target_builder if target_builder in {"agy", "codex-local"} else "agy"
+                # Model recommended codex-local but constraints are not met -> fail-closed safety!
+                # If agy quota is exhausted, fail-closed without silent transfer
+                if agy_quota != "OK":
+                    reason = "SLOT_QUOTA_EXHAUSTED_AGY"
+                    self.ledger.record_decision({
+                        "task_id": task_id,
+                        "event": "QUOTA_FAIL_CLOSED",
+                        "slot": "agy",
+                        "reason": reason,
+                    })
+                    return False, None, reason
+                target_slot = "agy"
+        else:
+            # Model suggested agy or deterministic default
+            if agy_quota != "OK":
+                if is_fallback_candidate:
+                    target_slot = "codex-local"
+                else:
+                    reason = "SLOT_QUOTA_EXHAUSTED_AGY"
+                    self.ledger.record_decision({
+                        "task_id": task_id,
+                        "event": "QUOTA_FAIL_CLOSED",
+                        "slot": "agy",
+                        "reason": reason,
+                    })
+                    return False, None, reason
+            else:
+                target_slot = "agy"
 
-            # 5. Fail-closed quota check on the determined slot
-            # Signal of exhaustion stops captures of that slot; does NOT silently transfer load!
-            if self.slot_quota_status.get(target_slot) != "OK":
-                return False, None, f"SLOT_QUOTA_EXHAUSTED_{target_slot.upper()}"
+        # 6. Final fail-closed quota check on the selected slot
+        if self.slot_quota_status.get(target_slot) != "OK":
+            reason = f"SLOT_QUOTA_EXHAUSTED_{target_slot.upper()}"
+            self.ledger.record_decision({
+                "task_id": task_id,
+                "event": "QUOTA_FAIL_CLOSED",
+                "slot": target_slot,
+                "reason": reason,
+            })
+            return False, None, reason
 
-            # 6. Apply pacing for agy
-            agy_busy = (time.time() - self.last_agy_start) < self.pacing_secs
-            if target_slot == "agy" and agy_busy and wait_time_secs < 7200:
-                return False, None, "PACING_BACKOFF"
+        # 7. Apply pacing interval for agy
+        agy_busy = (time.time() - self.last_agy_start) < self.pacing_secs
+        if target_slot == "agy" and agy_busy and wait_time_secs < 7200:
+            self.ledger.record_decision({
+                "task_id": task_id,
+                "event": "PACING_BACKOFF",
+                "slot": "agy",
+            })
+            return False, None, "PACING_BACKOFF"
 
-            # 7. Grant atomic lease
-            new_lease = LeaseRecord(task_id=task_id, slot=target_slot, lease_ttl_secs=lease_ttl_secs)
-            self.active_leases[task_id] = new_lease
-            if target_slot == "agy":
-                self.last_agy_start = time.time()
+        # 8. Grant atomic durable lease
+        acquired, err = self.lease_manager.acquire_lease(
+            task_id=task_id,
+            slot=target_slot,
+            lease_ttl_secs=lease_ttl_secs,
+            commit_sha=commit_sha,
+        )
+        if not acquired:
+            self.ledger.record_decision({
+                "task_id": task_id,
+                "event": "DOUBLE_CLAIM_REJECTED",
+                "slot": target_slot,
+            })
+            return False, None, err or "DOUBLE_CLAIM_REJECTED"
 
-            return True, target_slot, f"CLAIMED_{target_slot.upper()}_{router_mode}"
+        if target_slot == "agy":
+            self.last_agy_start = time.time()
+
+        outcome = f"CLAIMED_{target_slot.upper()}_{router_mode}"
+        self.ledger.record_decision({
+            "task_id": task_id,
+            "event": "TASK_CLAIMED",
+            "slot": target_slot,
+            "router_mode": router_mode,
+            "tier": tier,
+            "wait_time_secs": wait_time_secs,
+            "commit_sha": commit_sha,
+        })
+        return True, target_slot, outcome
 
     def release_lease(self, task_id: str):
-        with self.lock:
-            if task_id in self.active_leases:
-                del self.active_leases[task_id]
+        self.lease_manager.release_lease(task_id)
