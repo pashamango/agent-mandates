@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use sha2::{Digest, Sha256};
+use tracing::{info, warn};
 
 use crate::canonical::validate_canonical_rules;
 use crate::lease::DurableLeaseManager;
@@ -112,6 +113,14 @@ impl SmartRouter {
         }
     }
 
+    pub fn get_slot_health(&self, slot: &str) -> String {
+        self.slot_health_status
+            .lock()
+            .ok()
+            .and_then(|m| m.get(slot).cloned())
+            .unwrap_or_else(|| "HEALTH_UNKNOWN".to_string())
+    }
+
     pub fn set_pilot_passed(&self, passed: bool) {
         if let Ok(mut p) = self.pilot_passed.lock() {
             *p = passed;
@@ -130,7 +139,9 @@ impl SmartRouter {
 
     pub fn refresh_slot_health<P: AsRef<std::path::Path>>(&self, codex_bin: P) {
         let p = codex_bin.as_ref();
+        info!("Starting active health probe for slot 'codex-local' using binary: {:?}", p);
         if !p.exists() {
+            warn!("Codex-local binary not found at {:?}", p);
             self.set_slot_health("codex-local", "HEALTH_FAILED");
             let _ = self.ledger.record_decision(serde_json::json!({
                 "event": "SLOT_HEALTH_CHECK_FAILED",
@@ -141,19 +152,30 @@ impl SmartRouter {
         }
 
         // 1. Version check
-        let version_ok = match std::process::Command::new(p).arg("--version").output() {
-            Ok(o) => o.status.success(),
-            Err(_) => false,
+        let version_out = match std::process::Command::new(p).arg("--version").output() {
+            Ok(o) => {
+                if o.status.success() {
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                } else {
+                    None
+                }
+            }
+            Err(_) => None,
         };
-        if !version_ok {
-            self.set_slot_health("codex-local", "HEALTH_FAILED");
-            let _ = self.ledger.record_decision(serde_json::json!({
-                "event": "SLOT_HEALTH_CHECK_FAILED",
-                "slot": "codex-local",
-                "reason": "CLI --version check failed",
-            }));
-            return;
-        }
+        let version_str = match version_out {
+            Some(v) => v,
+            None => {
+                warn!("Codex-local CLI --version check failed");
+                self.set_slot_health("codex-local", "HEALTH_FAILED");
+                let _ = self.ledger.record_decision(serde_json::json!({
+                    "event": "SLOT_HEALTH_CHECK_FAILED",
+                    "slot": "codex-local",
+                    "reason": "CLI --version check failed",
+                }));
+                return;
+            }
+        };
+        info!("Codex-local CLI version verified: {}", version_str);
 
         // 2. Active Probe Task Dispatch to verify §6.1 builder contract:
         // Slot must accept a probe task, execute work in an isolated repo, and produce a verifiable git handoff
@@ -179,6 +201,7 @@ impl SmartRouter {
                 return Err("git init failed".to_string());
             }
 
+            info!("Dispatching active probe task to {:?} in isolated workspace {}", p, probe_dir);
             // Dispatch probe task to the slot binary with 3s timeout guard
             let mut cmd = std::process::Command::new(p);
             cmd.args(&["--health-probe", &probe_dir]);
@@ -223,6 +246,7 @@ impl SmartRouter {
                 return Err("Missing required evidence/HANDOFF.json receipt from slot probe".to_string());
             }
 
+            info!("Probe task completed. Reading required evidence/HANDOFF.json receipt");
             let content = std::fs::read_to_string(&handoff_file).map_err(|e| format!("Failed to read handoff receipt: {}", e))?;
             let v: serde_json::Value = serde_json::from_str(&content).map_err(|e| format!("Corrupted handoff JSON: {}", e))?;
 
@@ -236,6 +260,8 @@ impl SmartRouter {
                     repo_url, branch, commit_sha
                 ));
             }
+
+            info!("Verified valid git handoff receipt: repo_url='{}', branch='{}', commit_sha='{}'", repo_url, branch, commit_sha);
 
             // Verify clean clone and checkout reproducibility (§6.1)
             let clone_out = std::process::Command::new("git")
@@ -256,6 +282,7 @@ impl SmartRouter {
                 return Err(format!("Commit SHA mismatch in clean clone: {} vs {}", verified_sha, commit_sha));
             }
 
+            info!("Clean clone and detached checkout verified successfully for commit {}", verified_sha);
             Ok(())
         })();
 
@@ -265,9 +292,11 @@ impl SmartRouter {
         match probe_res {
             Ok(()) => {
                 self.set_slot_health("codex-local", "HEALTH_OK");
+                info!("Slot 'codex-local' health-check PASSED: status = HEALTH_OK (active probe & git clean-clone verified)");
             }
             Err(e) => {
                 self.set_slot_health("codex-local", "HEALTH_FAILED");
+                warn!("Slot 'codex-local' health-check FAILED: {}", e);
                 let _ = self.ledger.record_decision(serde_json::json!({
                     "event": "SLOT_HEALTH_CHECK_FAILED",
                     "slot": "codex-local",

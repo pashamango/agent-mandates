@@ -1,13 +1,13 @@
 running 10 tests
 test test_rust_acceptance_1_task_without_project ... ok
 test test_rust_acceptance_2_task_without_tier ... ok
-test test_rust_acceptance_6_quota_exhaustion_and_pilot_fail_closed ... ok
 test test_rust_acceptance_3_submitted_frozen_and_status ... ok
-test test_rust_acceptance_5_double_claim_and_durable_lease ... ok
 test test_rust_acceptance_4_fallback_triggers ... ok
+test test_rust_acceptance_5_double_claim_and_durable_lease ... ok
+test test_rust_acceptance_6_quota_exhaustion_and_pilot_fail_closed ... ok
 test test_rust_acceptance_7_model_decision_and_deterministic_fallback ... ok
 test test_rust_acceptance_8_historical_cases ... ok
 test test_rust_acceptance_9_zero_trust_lease_and_gate_properties ... ok
 test test_rust_acceptance_10_daemon_integration_webhook_and_vacuum ... ok
 
-test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.79s
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.13s

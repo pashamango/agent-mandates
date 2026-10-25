@@ -59,6 +59,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let router = std::sync::Arc::new(fleetd::router::SmartRouter::new(300, lease_manager, ledger, false));
     let linear = std::sync::Arc::new(fleetd::linear::LinearClient::new(&config.linear_api_url, &config.linear_api_key));
 
+    // Active Health Probe & Pilot Gate on startup (§6.1, §6.2)
+    info!("Performing startup pilot gate and health check (§6.1)...");
+    router.refresh_pilot_gate("fleetd-evolution/evidence/PILOT_MIN_221_RECEIPT.json");
+    router.refresh_slot_health(&config.codex_bin);
+    let initial_health = router.get_slot_health("codex-local");
+    info!("Slot 'codex-local' initial health status: {}", initial_health);
+
     // Spawn proactive backlog vacuum loop
     let vacuum_config = config.clone();
     let vacuum_db = db.clone();

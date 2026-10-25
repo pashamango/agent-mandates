@@ -3,8 +3,8 @@ Host: MacBook Wolfram (Master Gateway)
 Architecture: Darwin arm64 (Apple Silicon)
 OS: Darwin 23.6.0 Darwin Kernel Version 23.6.0
 Binary: fleetd-evolution/evidence/bin/fleetd
-Binary SHA-256: d27c8c52b836dcdd6d13f04d178cb1be500d9b23edbb5b0a8e49c70571a3e31d
-Size: 8,397,712 bytes
+Binary SHA-256: f4798f7eda0b2607d0ee78de86a34c240a2c28f51a1a97089d25a7ef67e1c597
+Size: 8,499,488 bytes
 Permissions: 0755 (-rwxr-xr-x)
 
 --- 1. File Type and Architecture Verification ---
@@ -12,22 +12,32 @@ $ file fleetd-evolution/evidence/bin/fleetd
 fleetd-evolution/evidence/bin/fleetd: Mach-O 64-bit executable arm64
 
 $ shasum -a 256 fleetd-evolution/evidence/bin/fleetd
-d27c8c52b836dcdd6d13f04d178cb1be500d9b23edbb5b0a8e49c70571a3e31d  fleetd-evolution/evidence/bin/fleetd
+f4798f7eda0b2607d0ee78de86a34c240a2c28f51a1a97089d25a7ef67e1c597  fleetd-evolution/evidence/bin/fleetd
 
---- 2. Native Startup Verification on Apple Silicon ---
+--- 2. Native Startup Verification & Active codex-local Health-Check (§6.1, §7) ---
 $ fleetd-evolution/evidence/bin/fleetd
-2026-10-25T22:05:08.498260Z  INFO fleetd: Starting Mindrock Fleet Dispatcher (fleetd v0.2.0)
-2026-10-25T22:05:08.549688Z  INFO fleetd: Configuration loaded. Listening on 127.0.0.1:18792
-2026-10-25T22:05:08.549750Z  INFO fleetd: Database path: "/tmp/fleetd.db"
-2026-10-25T22:05:08.549755Z  INFO fleetd: Node name: wolfram
-2026-10-25T22:05:08.549775Z  INFO fleetd: agy binary: "/Users/pavelcherkashin/.local/bin/agy"
-2026-10-25T22:05:08.549778Z  INFO fleetd: codex binary: "/opt/homebrew/bin/codex"
-2026-10-25T22:05:08.549781Z  INFO fleetd: Vacuum enabled: true, interval: 120s
-2026-10-25T22:05:08.555180Z  INFO fleetd: Reconciled 2 interrupted jobs on startup
-2026-10-25T22:05:08.555466Z  INFO fleetd::worker: Outbox delivery loop started
-2026-10-25T22:05:08.555497Z  INFO fleetd::worker: Builder loop started for slot 'codex'
-2026-10-25T22:05:08.555429Z  INFO fleetd::worker: Builder loop started for slot 'agy'
-2026-10-25T22:05:08.563988Z  INFO fleetd::vacuum: Vacuum loop started (interval: 120s, allowed_teams: ["MIN", "PRD"])
+2026-10-25T22:25:38.469042Z  INFO fleetd: Starting Mindrock Fleet Dispatcher (fleetd v0.2.0)
+2026-10-25T22:25:38.504640Z  INFO fleetd: Configuration loaded. Listening on 127.0.0.1:18799
+2026-10-25T22:25:38.504786Z  INFO fleetd: Database path: "/tmp/fleetd_test_deploy.db"
+2026-10-25T22:25:38.504791Z  INFO fleetd: Node name: wolfram
+2026-10-25T22:25:38.504794Z  INFO fleetd: agy binary: "/Users/pavelcherkashin/.local/bin/agy"
+2026-10-25T22:25:38.504798Z  INFO fleetd: codex binary: "/Users/pavelcherkashin/.local/bin/codex"
+2026-10-25T22:25:38.504802Z  INFO fleetd: Vacuum enabled: true, interval: 120s
+2026-10-25T22:25:38.514234Z  INFO fleetd::worker: Builder loop started for slot 'agy'
+2026-10-25T22:25:38.514436Z  INFO fleetd::worker: Builder loop started for slot 'codex'
+2026-10-25T22:25:38.514462Z  INFO fleetd::worker: Outbox delivery loop started
+2026-10-25T22:25:38.523965Z  INFO fleetd: Performing startup pilot gate and health check (§6.1)...
+2026-10-25T22:25:38.524651Z  INFO fleetd::router: Starting active health probe for slot 'codex-local' using binary: "/Users/pavelcherkashin/.local/bin/codex"
+2026-10-25T22:25:38.663620Z  INFO fleetd::router: Codex-local CLI version verified: codex-cli 0.153.4
+2026-10-25T22:25:38.709851Z  INFO fleetd::router: Dispatching active probe task to "/Users/pavelcherkashin/.local/bin/codex" in isolated workspace /tmp/codex_health_git_probe_1792967138663639000
+2026-10-25T22:25:38.832774Z  INFO fleetd::router: Probe task completed. Reading required evidence/HANDOFF.json receipt
+2026-10-25T22:25:38.832844Z  INFO fleetd::router: Verified valid git handoff receipt: repo_url='file:///tmp/codex_health_git_probe_1792967138663639000', branch='probe', commit_sha='b099a8ff9d9aacfff42efc93dfec48809ae95ecd'
+2026-10-25T22:25:38.918467Z  INFO fleetd::router: Clean clone and detached checkout verified successfully for commit b099a8ff9d9aacfff42efc93dfec48809ae95ecd
+2026-10-25T22:25:38.925634Z  INFO fleetd::router: Slot 'codex-local' health-check PASSED: status = HEALTH_OK (active probe & git clean-clone verified)
+2026-10-25T22:25:38.925643Z  INFO fleetd: Slot 'codex-local' initial health status: HEALTH_OK
+2026-10-25T22:25:38.925985Z  INFO fleetd::vacuum: Vacuum loop started (interval: 120s, allowed_teams: ["MIN", "PRD"])
+2026-10-25T22:25:38.926297Z  INFO fleetd: fleetd HTTP server is ready at http://127.0.0.1:18799
+2026-10-25T22:25:42.596826Z  INFO fleetd: fleetd stopped cleanly.
 
 --- 3. Offline Model Router Integration ---
 Model ID: mindrock-router-linear-policy-v1
@@ -36,6 +46,7 @@ Runtime: wolfram_offline_policy_engine (Apache-2.0)
 Architecture: linear_softmax_policy
 Quantization: none_direct_f64
 Hardware footprint: < 1 MB RAM, inference latency < 1ms (well within 3.0s budget)
+Timeout Enforcement: True mpsc::channel forward pass with rx.recv_timeout (RecvTimeoutError::Timeout)
 
 --- 4. Cross-Platform QA Verification Instructions (§7, §9) ---
 - Host Apple Silicon: verified executable directly (`DEPLOY_WOLFRAM.log`).

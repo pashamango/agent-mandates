@@ -57,6 +57,7 @@ pub struct LocalModelEngine {
     weights: [[f64; 10]; 2],
     biases: [f64; 2],
     pub is_loaded: bool,
+    pub inference_delay: Duration,
 }
 
 impl LocalModelEngine {
@@ -70,6 +71,7 @@ impl LocalModelEngine {
                 weights: [[0.0; 10]; 2],
                 biases: [0.0; 2],
                 is_loaded: false,
+                inference_delay: Duration::ZERO,
             },
         }
     }
@@ -193,6 +195,7 @@ impl LocalModelEngine {
             weights,
             biases,
             is_loaded: true,
+            inference_delay: Duration::ZERO,
         })
     }
 
@@ -271,19 +274,16 @@ impl LocalModelEngine {
         );
 
         let budget_secs = self.metadata.latency_budget_secs;
-        if budget_secs <= 0.00001 {
-            return Err(format!(
-                "MODEL_INFERENCE_TIMEOUT: Offline model runtime exceeded budget of {:.3}s",
-                budget_secs
-            ));
-        }
-
+        let delay = self.inference_delay;
         let weights = current_engine.weights;
         let biases = current_engine.biases;
         let feat = features.clone();
 
         let (tx, rx) = std::sync::mpsc::channel();
         let handle = std::thread::spawn(move || {
+            if delay > Duration::ZERO {
+                std::thread::sleep(delay);
+            }
             // Compute logits: y_i = \sum_j W_{ij} x_j + b_i
             let mut logits = [biases[0], biases[1]];
             for i in 0..2 {
@@ -308,11 +308,14 @@ impl LocalModelEngine {
                 let _ = handle.join();
                 res
             }
-            Err(_) => {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 return Err(format!(
-                    "MODEL_INFERENCE_TIMEOUT: Offline model runtime exceeded budget of {:.3}s",
+                    "MODEL_INFERENCE_TIMEOUT: Offline model runtime exceeded budget of {:.6}s (RecvTimeoutError::Timeout)",
                     budget_secs
                 ));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("MODEL_ROUTER_UNAVAILABLE: inference worker thread disconnected unexpectedly".to_string());
             }
         };
 

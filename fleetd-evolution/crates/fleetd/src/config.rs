@@ -75,11 +75,16 @@ impl Config {
             .ok()
             .map(PathBuf::from)
             .unwrap_or_else(|| {
-                let p1 = PathBuf::from("/opt/homebrew/bin/codex");
-                if p1.exists() {
-                    p1
+                let p_local = PathBuf::from(format!("{}/.local/bin/codex", home));
+                if p_local.exists() {
+                    p_local
                 } else {
-                    PathBuf::from(format!("{}/.npm-global/bin/codex", home))
+                    let p1 = PathBuf::from("/opt/homebrew/bin/codex");
+                    if p1.exists() {
+                        p1
+                    } else {
+                        PathBuf::from(format!("{}/.npm-global/bin/codex", home))
+                    }
                 }
             });
 

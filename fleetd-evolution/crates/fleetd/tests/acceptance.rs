@@ -275,9 +275,10 @@ fn test_rust_acceptance_7_model_decision_and_deterministic_fallback() {
     let _ = router.lease_manager.release_lease("TASK-MODEL");
 
     // 7b: Real timeout triggers deterministic fallback (§5.2)
+    // Verify genuine recv_timeout triggering RecvTimeoutError::Timeout via controlled inference delay
     let mut timeout_router = SmartRouter::new(0, lease_mgr.clone(), ledger.clone(), true);
-    // Configure ultra-short latency budget (0.000001s) to test real timeout enforcement without dummy bools
-    timeout_router.model_engine.metadata.latency_budget_secs = 0.000001;
+    timeout_router.model_engine.inference_delay = std::time::Duration::from_millis(50);
+    timeout_router.model_engine.metadata.latency_budget_secs = 0.005; // 5ms budget vs 50ms workload
     let dec_timeout = timeout_router.route_and_claim_task(&task, 3600, None);
     assert!(dec_timeout.success);
     assert_eq!(dec_timeout.reason, "deterministic_fallback");
@@ -285,9 +286,9 @@ fn test_rust_acceptance_7_model_decision_and_deterministic_fallback() {
     let records = ledger.read_records().unwrap();
     let timeout_records: Vec<_> = records.iter().filter(|r| {
         r.get("event") == Some(&serde_json::json!("MODEL_ROUTER_UNAVAILABLE"))
-            && r.get("reason").and_then(|v| v.as_str()).map(|s| s.contains("MODEL_INFERENCE_TIMEOUT")).unwrap_or(false)
+            && r.get("reason").and_then(|v| v.as_str()).map(|s| s.contains("MODEL_INFERENCE_TIMEOUT") && s.contains("RecvTimeoutError::Timeout")).unwrap_or(false)
     }).collect();
-    assert!(!timeout_records.is_empty(), "Ledger must record MODEL_ROUTER_UNAVAILABLE due to MODEL_INFERENCE_TIMEOUT");
+    assert!(!timeout_records.is_empty(), "Ledger must record MODEL_ROUTER_UNAVAILABLE due to real RecvTimeoutError::Timeout");
     let _ = router.lease_manager.release_lease("TASK-MODEL");
 
     // 7c: Negative test - Missing weights file triggers MODEL_ROUTER_UNAVAILABLE and fallback (§5.2)
