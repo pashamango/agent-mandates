@@ -27,7 +27,7 @@
   - `fleetd-evolution/crates/fleetd/src/runner.rs`: Изоляция процессов, группы процессов unix, передача prompt
   - `fleetd-evolution/crates/fleetd/src/db.rs`: SQLite хранилище очереди задач, outbox и reconciliation
   - `fleetd-evolution/crates/fleetd/src/linear.rs`: Клиент GraphQL API Linear
-  - `fleetd-evolution/crates/fleetd/src/model.rs`: Wolfram Offline Model Inference Engine (§5.1, §5.2) с квантованными весами (Q4_K_M) и детерминированным fallback
+  - `fleetd-evolution/crates/fleetd/src/model.rs`: Wolfram Offline Model Inference Engine (§5.1, §5.2) с калиброванной линейной моделью политики (mindrock-router-linear-policy-v1) и детерминированным fallback
   - `fleetd-evolution/crates/fleetd/src/server.rs`: Webhook-приёмник Linear
   - `fleetd-evolution/crates/fleetd/tests/acceptance.rs`: Интеграционные acceptance-тесты на Rust, покрывающие все 9 критериев приемки MIN-229 и проверку интеграции daemon hot path (10 интеграционных тестов)
 
@@ -53,7 +53,7 @@ cargo build --release --locked
 
 ### Контрольная сумма и верификация бинарника release:
 ```text
-SHA256: d335b3006fd401c39a5f1507395c4f148869db04331042b5f98d4ce08c77bd29  fleetd-evolution/evidence/bin/fleetd
+SHA256: d27c8c52b836dcdd6d13f04d178cb1be500d9b23edbb5b0a8e49c70571a3e31d  fleetd-evolution/evidence/bin/fleetd
 ```
 
 Бинарник скомпилирован на MacBook Wolfram (Apple Silicon, aarch64-apple-darwin), протестирован нативно (`evidence/DEPLOY_WOLFRAM.log`) и включён непосредственно в дерево репозитория (`fleetd-evolution/evidence/bin/fleetd`) с фиксацией в `MANIFEST.sha256`. Любой проверяющий из чистого клона может напрямую проверить контрольную сумму бинарника (`sha256sum -c MANIFEST.sha256`), а также пересобрать бинарник из исходников `crates/fleetd` на любой платформе (`cargo test --locked`, `cargo build --release --locked`).

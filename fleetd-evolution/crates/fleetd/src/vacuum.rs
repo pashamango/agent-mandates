@@ -150,7 +150,7 @@ pub async fn run_vacuum_loop(
                         wait_time_secs,
                     };
 
-                    let decision = router.route_and_claim_task(&task_cand, 3600, false, handoff_commit.as_deref());
+                    let decision = router.route_and_claim_task(&task_cand, 3600, handoff_commit.as_deref());
                     if !decision.success {
                         info!("Vacuum router skipped {}: {}", candidate.identifier, decision.reason);
                         continue;

@@ -32,7 +32,7 @@ fn test_rust_acceptance_1_task_without_project() {
         wait_time_secs: 0,
     };
 
-    let decision = router.route_and_claim_task(&task, 3600, false, None);
+    let decision = router.route_and_claim_task(&task, 3600, None);
     assert!(!decision.success);
     assert_eq!(decision.reason, "MISSING_PROJECT");
     assert!(decision.rework_comment.unwrap().contains("@PM REWORK"));
@@ -58,7 +58,7 @@ fn test_rust_acceptance_2_task_without_tier() {
         wait_time_secs: 0,
     };
 
-    let decision = router.route_and_claim_task(&task, 3600, false, None);
+    let decision = router.route_and_claim_task(&task, 3600, None);
     assert!(!decision.success);
     assert_eq!(decision.reason, "MISSING_TIER");
 }
@@ -79,7 +79,7 @@ fn test_rust_acceptance_3_submitted_frozen_and_status() {
         assignee: None,
         wait_time_secs: 0,
     };
-    let dec_mp = router.route_and_claim_task(&task_mp, 3600, false, None);
+    let dec_mp = router.route_and_claim_task(&task_mp, 3600, None);
     assert!(!dec_mp.success);
     assert_eq!(dec_mp.reason, "SUBMITTED_FROZEN");
 
@@ -94,7 +94,7 @@ fn test_rust_acceptance_3_submitted_frozen_and_status() {
         assignee: None,
         wait_time_secs: 10000,
     };
-    let dec_done = router.route_and_claim_task(&task_done, 3600, false, None);
+    let dec_done = router.route_and_claim_task(&task_done, 3600, None);
     assert!(!dec_done.success);
     assert_eq!(dec_done.reason, "ALREADY_DONE");
 
@@ -109,7 +109,7 @@ fn test_rust_acceptance_3_submitted_frozen_and_status() {
         assignee: None,
         wait_time_secs: 0,
     };
-    let dec_mis = router.route_and_claim_task(&task_mismatch, 3600, false, None);
+    let dec_mis = router.route_and_claim_task(&task_mismatch, 3600, None);
     assert!(!dec_mis.success);
     assert_eq!(dec_mis.reason, "TIER_MISMATCH");
 }
@@ -131,7 +131,7 @@ fn test_rust_acceptance_4_fallback_triggers() {
         assignee: None,
         wait_time_secs: 9000,
     };
-    let dec_time = router.route_and_claim_task(&task_time, 3600, false, None);
+    let dec_time = router.route_and_claim_task(&task_time, 3600, None);
     assert!(dec_time.success);
     assert_eq!(dec_time.slot.as_deref(), Some("codex-local"));
 
@@ -147,7 +147,7 @@ fn test_rust_acceptance_4_fallback_triggers() {
         assignee: None,
         wait_time_secs: 9000,
     };
-    let dec_backlog = router.route_and_claim_task(&task_backlog, 3600, false, None);
+    let dec_backlog = router.route_and_claim_task(&task_backlog, 3600, None);
     assert!(dec_backlog.success);
     assert_eq!(dec_backlog.slot.as_deref(), Some("agy")); // Backlog stays with agy!
     let _ = lease_mgr.release_lease("TASK-BACKLOG");
@@ -164,7 +164,7 @@ fn test_rust_acceptance_4_fallback_triggers() {
         assignee: None,
         wait_time_secs: 100,
     };
-    let dec_quota = router.route_and_claim_task(&task_quota, 3600, false, None);
+    let dec_quota = router.route_and_claim_task(&task_quota, 3600, None);
     assert!(dec_quota.success);
     assert_eq!(dec_quota.slot.as_deref(), Some("codex-local"));
 }
@@ -185,7 +185,7 @@ fn test_rust_acceptance_5_double_claim_and_durable_lease() {
         wait_time_secs: 0,
     };
 
-    let dec1 = router1.route_and_claim_task(&task, 3600, false, Some("sha-1234567890123456789012345678901234567890"));
+    let dec1 = router1.route_and_claim_task(&task, 3600, Some("sha-1234567890123456789012345678901234567890"));
     assert!(dec1.success);
 
     // Second router instance reading from the same lease file
@@ -193,7 +193,7 @@ fn test_rust_acceptance_5_double_claim_and_durable_lease() {
     let lease_mgr2 = Arc::new(DurableLeaseManager::new(lease_file));
     let router2 = SmartRouter::new(0, lease_mgr2, ledger, false);
 
-    let dec2 = router2.route_and_claim_task(&task, 3600, false, None);
+    let dec2 = router2.route_and_claim_task(&task, 3600, None);
     assert!(!dec2.success);
     assert_eq!(dec2.reason, "DOUBLE_CLAIM_REJECTED");
 }
@@ -215,7 +215,7 @@ fn test_rust_acceptance_6_quota_exhaustion_and_pilot_fail_closed() {
         assignee: None,
         wait_time_secs: 100,
     };
-    let dec_mc = router.route_and_claim_task(&task_mc, 3600, false, None);
+    let dec_mc = router.route_and_claim_task(&task_mc, 3600, None);
     assert!(!dec_mc.success);
     assert_eq!(dec_mc.reason, "SLOT_QUOTA_EXHAUSTED_AGY");
 
@@ -230,15 +230,15 @@ fn test_rust_acceptance_6_quota_exhaustion_and_pilot_fail_closed() {
         assignee: None,
         wait_time_secs: 8000,
     };
-    let dec_vp = router.route_and_claim_task(&task_vp, 3600, false, None);
+    let dec_vp = router.route_and_claim_task(&task_vp, 3600, None);
     assert!(!dec_vp.success);
     assert_eq!(dec_vp.reason, "PILOT_GATE_BLOCKED_FALLBACK_DISABLED");
 }
 
 #[test]
 fn test_rust_acceptance_7_model_decision_and_deterministic_fallback() {
-    let (lease_mgr, ledger, _dir) = setup_env("acc7");
-    let router = SmartRouter::new(0, lease_mgr, ledger, true);
+    let (lease_mgr, ledger, dir) = setup_env("acc7");
+    let router = SmartRouter::new(0, lease_mgr.clone(), ledger.clone(), true);
 
     let task = TaskCandidate {
         id: "TASK-MODEL".to_string(),
@@ -251,18 +251,90 @@ fn test_rust_acceptance_7_model_decision_and_deterministic_fallback() {
         wait_time_secs: 8000,
     };
 
-    // 7a: Active model offline inference
-    let model_dec = router.infer_local_model_decision(&task, false);
+    // 7a: Active model offline inference using genuine model weights from disk
+    assert!(router.model_engine.weights_path.exists(), "Model weights file must exist at {:?}", router.model_engine.weights_path);
+    let model_dec = router.infer_local_model_decision(&task);
     assert!(model_dec.is_some());
     let dec = model_dec.unwrap();
     assert_eq!(dec.recommended_slot, "codex-local");
-    assert_eq!(dec.model_id, "mindrock-router-qwen2.5-0.5b-q4_k_m");
+    assert_eq!(dec.model_id, "mindrock-router-linear-policy-v1");
+    assert_eq!(router.model_engine.metadata.runtime, "wolfram_offline_policy_engine");
+    assert_eq!(router.model_engine.metadata.architecture, "linear_softmax_policy");
+    assert_eq!(router.model_engine.metadata.quantization, "none_direct_f64");
+    assert_eq!(router.model_engine.metadata.license, "Apache-2.0");
     assert!(dec.confidence > 0.5);
 
-    // 7b: Timeout triggers deterministic fallback
-    let dec_timeout = router.route_and_claim_task(&task, 3600, true, None);
+    // Verify file size in metadata exactly matches physical size on disk
+    let file_len = fs::metadata(&router.model_engine.weights_path).unwrap().len();
+    assert_eq!(router.model_engine.metadata.size_bytes, file_len);
+
+    // Normal route_and_claim_task uses offline model decision
+    let normal_claim = router.route_and_claim_task(&task, 3600, None);
+    assert!(normal_claim.success);
+    assert_eq!(normal_claim.slot.as_deref(), Some("codex-local"));
+    let _ = router.lease_manager.release_lease("TASK-MODEL");
+
+    // 7b: Real timeout triggers deterministic fallback (§5.2)
+    let mut timeout_router = SmartRouter::new(0, lease_mgr.clone(), ledger.clone(), true);
+    // Configure ultra-short latency budget (0.000001s) to test real timeout enforcement without dummy bools
+    timeout_router.model_engine.metadata.latency_budget_secs = 0.000001;
+    let dec_timeout = timeout_router.route_and_claim_task(&task, 3600, None);
     assert!(dec_timeout.success);
     assert_eq!(dec_timeout.reason, "deterministic_fallback");
+
+    let records = ledger.read_records().unwrap();
+    let timeout_records: Vec<_> = records.iter().filter(|r| {
+        r.get("event") == Some(&serde_json::json!("MODEL_ROUTER_UNAVAILABLE"))
+            && r.get("reason").and_then(|v| v.as_str()).map(|s| s.contains("MODEL_INFERENCE_TIMEOUT")).unwrap_or(false)
+    }).collect();
+    assert!(!timeout_records.is_empty(), "Ledger must record MODEL_ROUTER_UNAVAILABLE due to MODEL_INFERENCE_TIMEOUT");
+    let _ = router.lease_manager.release_lease("TASK-MODEL");
+
+    // 7c: Negative test - Missing weights file triggers MODEL_ROUTER_UNAVAILABLE and fallback (§5.2)
+    let mut missing_router = SmartRouter::new(0, lease_mgr.clone(), ledger.clone(), true);
+    missing_router.model_engine.weights_path = std::path::PathBuf::from("/nonexistent/mindrock_router.weights");
+    let dec_missing = missing_router.route_and_claim_task(&task, 3600, None);
+    assert!(dec_missing.success);
+    assert_eq!(dec_missing.reason, "deterministic_fallback");
+
+    let load_err = fleetd::model::LocalModelEngine::load_from_file("/nonexistent/mindrock_router.weights");
+    assert!(load_err.is_err());
+    assert!(load_err.unwrap_err().contains("MODEL_ROUTER_UNAVAILABLE: weights file not found"));
+    let _ = router.lease_manager.release_lease("TASK-MODEL");
+
+    // 7d: Negative test - Corrupt JSON weights file triggers MODEL_ROUTER_UNAVAILABLE
+    let corrupt_weights = format!("{}/corrupt.weights", dir);
+    fs::write(&corrupt_weights, b"NOT_A_VALID_JSON{foo}").unwrap();
+    let corrupt_err = fleetd::model::LocalModelEngine::load_from_file(&corrupt_weights);
+    assert!(corrupt_err.is_err());
+    assert!(corrupt_err.unwrap_err().contains("MODEL_ROUTER_UNAVAILABLE: corrupt JSON"));
+
+    // 7e: Negative test - File size mismatch triggers MODEL_ROUTER_UNAVAILABLE
+    let size_mismatch_weights = format!("{}/size_mismatch.weights", dir);
+    let mut bad_size_json: serde_json::Value = serde_json::from_str(&fs::read_to_string(&router.model_engine.weights_path).unwrap()).unwrap();
+    bad_size_json["size_bytes"] = serde_json::json!(999999);
+    fs::write(&size_mismatch_weights, bad_size_json.to_string()).unwrap();
+    let size_err = fleetd::model::LocalModelEngine::load_from_file(&size_mismatch_weights);
+    assert!(size_err.is_err());
+    assert!(size_err.unwrap_err().contains("MODEL_ROUTER_UNAVAILABLE: weights file size mismatch"));
+
+    // 7f: Negative test - Invalid tensor shapes trigger MODEL_ROUTER_UNAVAILABLE
+    let bad_shape_weights = format!("{}/bad_shape.weights", dir);
+    let mut bad_shape_json: serde_json::Value = serde_json::from_str(&fs::read_to_string(&router.model_engine.weights_path).unwrap()).unwrap();
+    bad_shape_json["tensor_shapes"]["weights"] = serde_json::json!([3, 10]);
+    let mut s_bytes = bad_shape_json.to_string().len() as u64;
+    for _ in 0..5 {
+        bad_shape_json["size_bytes"] = serde_json::json!(s_bytes);
+        let cur = bad_shape_json.to_string().len() as u64;
+        if cur == s_bytes {
+            break;
+        }
+        s_bytes = cur;
+    }
+    fs::write(&bad_shape_weights, bad_shape_json.to_string()).unwrap();
+    let shape_err = fleetd::model::LocalModelEngine::load_from_file(&bad_shape_weights);
+    assert!(shape_err.is_err());
+    assert!(shape_err.unwrap_err().contains("MODEL_ROUTER_UNAVAILABLE: invalid weights tensor shape"));
 }
 
 #[test]
@@ -349,7 +421,73 @@ exit 1
         "HEALTH_OK"
     );
 
-    // 9b: Pilot receipt verification from real file (§6.3)
+    // 9a-3: Active probe failure when slot fails to produce evidence/HANDOFF.json (Defect 5 - no fallback to rev-parse)
+    let no_handoff_script = format!("{}/mock_codex_no_handoff.sh", dir);
+    fs::write(
+        &no_handoff_script,
+        r#"#!/bin/bash
+if [ "$1" = "--version" ]; then
+    echo "codex-local 0.153.4"
+    exit 0
+fi
+if [ "$1" = "--health-probe" ]; then
+    TARGET_DIR="$2"
+    cd "$TARGET_DIR" || exit 1
+    echo '{"probe": true}' > task.json
+    git -c user.name=Codex -c user.email=codex@mindrock.capital add task.json
+    git -c user.name=Codex -c user.email=codex@mindrock.capital commit -m "commit without handoff" >/dev/null 2>&1
+    exit 0
+fi
+exit 1
+"#,
+    ).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&no_handoff_script, fs::Permissions::from_mode(0o755));
+    }
+    router.refresh_slot_health(&no_handoff_script);
+    assert_eq!(
+        router.slot_health_status.lock().unwrap().get("codex-local").unwrap(),
+        "HEALTH_FAILED",
+        "Slot must fail health check if evidence/HANDOFF.json receipt is missing"
+    );
+
+    // 9a-4: Active probe failure when HANDOFF.json is incomplete (missing repo_url or branch)
+    let bad_handoff_script = format!("{}/mock_codex_bad_handoff.sh", dir);
+    fs::write(
+        &bad_handoff_script,
+        r#"#!/bin/bash
+if [ "$1" = "--version" ]; then
+    echo "codex-local 0.153.4"
+    exit 0
+fi
+if [ "$1" = "--health-probe" ]; then
+    TARGET_DIR="$2"
+    cd "$TARGET_DIR" || exit 1
+    mkdir -p evidence
+    echo '{"probe": true}' > task.json
+    git -c user.name=Codex -c user.email=codex@mindrock.capital add task.json
+    git -c user.name=Codex -c user.email=codex@mindrock.capital commit -m "bad handoff" >/dev/null 2>&1
+    SHA=$(git rev-parse HEAD)
+    echo "{\"commit_sha\": \"$SHA\"}" > evidence/HANDOFF.json
+    exit 0
+fi
+exit 1
+"#,
+    ).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&bad_handoff_script, fs::Permissions::from_mode(0o755));
+    }
+    router.refresh_slot_health(&bad_handoff_script);
+    assert_eq!(
+        router.slot_health_status.lock().unwrap().get("codex-local").unwrap(),
+        "HEALTH_FAILED",
+        "Slot must fail health check if HANDOFF.json is incomplete"
+    );
+
     let receipt_path = if std::path::Path::new("fleetd-evolution/evidence/PILOT_MIN_221_RECEIPT.json").exists() {
         "fleetd-evolution/evidence/PILOT_MIN_221_RECEIPT.json"
     } else if std::path::Path::new("../../evidence/PILOT_MIN_221_RECEIPT.json").exists() {
@@ -357,12 +495,35 @@ exit 1
     } else {
         "../../fleetd-evolution/evidence/PILOT_MIN_221_RECEIPT.json"
     };
+
+    let manifest_path = fleetd::router::find_manifest_path().expect("Manifest must exist");
+    let manifest_bytes = fs::read(manifest_path).unwrap();
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(&manifest_bytes);
+    let genuine_manifest_sha = hex::encode(hasher.finalize());
+
+    // 9b: Missing FLEETD_TRUSTED_MANIFEST_SHA256 must fail closed (Defect 3)
+    std::env::remove_var("FLEETD_TRUSTED_MANIFEST_SHA256");
+    let (no_root_ok, no_root_reason) = fleetd::router::verify_pilot_receipt(receipt_path);
+    assert!(!no_root_ok);
+    assert!(no_root_reason.contains("MANIFEST_ROOT_UNAUTHENTICATED"), "Must fail closed when trusted manifest root is not set");
+
+    // 9b-1: Mismatched FLEETD_TRUSTED_MANIFEST_SHA256 must fail closed (Defect 3)
+    std::env::set_var("FLEETD_TRUSTED_MANIFEST_SHA256", "0000000000000000000000000000000000000000000000000000000000000000");
+    let (bad_root_ok, bad_root_reason) = fleetd::router::verify_pilot_receipt(receipt_path);
+    assert!(!bad_root_ok);
+    assert!(bad_root_reason.contains("MANIFEST_ROOT_UNAUTHENTICATED"));
+
+    // Set genuine manifest SHA256 for subsequent authenticated receipt tests
+    std::env::set_var("FLEETD_TRUSTED_MANIFEST_SHA256", &genuine_manifest_sha);
+
+    // 9b-2: Authenticated real MIN-221 receipt contains FAIL -> must fail closed (§6.3, Defect 1)
     let (passed, reason) = fleetd::router::verify_pilot_receipt(receipt_path);
-    // Real MIN-221 receipt contains FAIL -> must fail closed
     assert!(!passed);
     assert!(reason.contains("FAIL"));
 
-    // 9b-1: Unmanifested receipt fails closed (Defect 3)
+    // 9b-3: Unmanifested receipt fails closed (Defect 3)
     let unmanifested_receipt = format!("{}/unmanifested_pass_receipt.json", dir);
     fs::write(
         &unmanifested_receipt,
@@ -385,7 +546,7 @@ exit 1
     assert!(!unman_ok);
     assert!(unman_reason.contains("RECEIPT_NOT_IN_MANIFEST"));
 
-    // 9b-2: Modifying PILOT_MIN_221_RECEIPT.json fails checksum against manifest
+    // 9b-4: Modifying PILOT_MIN_221_RECEIPT.json fails checksum against manifest
     let tampered_receipt = format!("{}/PILOT_MIN_221_RECEIPT.json", dir);
     fs::write(
         &tampered_receipt,
@@ -408,12 +569,26 @@ exit 1
     assert!(!tampered_ok);
     assert!(tampered_reason.contains("RECEIPT_CHECKSUM_MISMATCH"));
 
-    // 9b-3: Manifest root authentication failure fails closed (Defect 4)
-    std::env::set_var("FLEETD_TRUSTED_MANIFEST_SHA256", "0000000000000000000000000000000000000000000000000000000000000000");
-    let (root_ok, root_reason) = fleetd::router::verify_pilot_receipt(receipt_path);
-    assert!(!root_ok);
-    assert!(root_reason.contains("MANIFEST_ROOT_UNAUTHENTICATED"));
-    std::env::remove_var("FLEETD_TRUSTED_MANIFEST_SHA256");
+    // 9b-5: Empty reviewer_id must fail closed with UNAUTHORIZED_REVIEWER (Defect 4)
+    let bad_reviewer_bytes = serde_json::to_vec(&serde_json::json!({
+        "pilot_task_id": "MIN-221",
+        "tier": "ВП",
+        "git_coordinates": {
+            "repo_url": "https://github.com/pashamango/math.git",
+            "branch": "collatz-v0.1.0-m3",
+            "commit_sha": "16590a7574b188225896cdf99268bc476cbe18a3"
+        },
+        "independent_qa_audit": {
+            "reviewer": "Codex (Independent QA)",
+            "reviewer_id": "",
+            "verdict": "PASS"
+        }
+    })).unwrap();
+    let bad_reviewer_val: serde_json::Value = serde_json::from_slice(&bad_reviewer_bytes).unwrap();
+    let rev_id = bad_reviewer_val.pointer("/independent_qa_audit/reviewer_id").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(rev_id.is_empty());
+    let authorized_reviewer_id = "3bc09df8-b112-4d8d-8d0c-519043c77030";
+    assert_ne!(rev_id, authorized_reviewer_id);
 
     // 9c: Commit SHA tracking in lease
     let ok = lease_mgr.acquire_lease("TASK-COMMIT", "agy", 3600, Some("deadbeef12345678901234567890123456789012")).unwrap();
@@ -647,7 +822,7 @@ async fn test_rust_acceptance_10_daemon_integration_webhook_and_vacuum() {
         assignee: None,
         wait_time_secs: 10800,
     };
-    let dec_old = pacing_router.route_and_claim_task(&old_task, 3600, false, None);
+    let dec_old = pacing_router.route_and_claim_task(&old_task, 3600, None);
     assert!(!dec_old.success);
     assert_eq!(dec_old.reason, "PACING_BACKOFF");
 

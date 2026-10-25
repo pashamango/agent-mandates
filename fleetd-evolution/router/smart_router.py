@@ -174,8 +174,10 @@ class SmartRouter:
     def infer_local_model_decision(self, task: Dict[str, Any], timeout_simulate: bool = False) -> Optional[Dict[str, Any]]:
         """
         Wolfram Offline Model Inference Engine (§5.1, §5.2).
-        Model: mindrock-router-qwen2.5-0.5b-q4_k_m
-        Runtime: wolfram_offline_quantized_inference (Apache-2.0)
+        Model: mindrock-router-linear-policy-v1
+        Runtime: wolfram_offline_policy_engine (Apache-2.0)
+        Architecture: linear_softmax_policy
+        Quantization: none_direct_f64
         Hardware Budget: 16 GB RAM, >= 20 GB disk, latency <= 3.0s.
         """
         if timeout_simulate:
@@ -205,7 +207,7 @@ class SmartRouter:
         return {
             "recommended_slot": slot,
             "confidence": conf,
-            "model_id": "mindrock-router-qwen2.5-0.5b-q4_k_m",
+            "model_id": "mindrock-router-linear-policy-v1",
         }
 
     def simulate_local_model_decision(self, task: Dict[str, Any], timeout_simulate: bool = False) -> Optional[str]:

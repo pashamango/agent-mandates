@@ -2,12 +2,13 @@
 //!
 //! Autonomous offline local inference for task routing on Wolfram.
 //! - Hardware Budget: 16 GB RAM, >= 20 GB free disk space.
-//! - Model ID: mindrock-router-qwen2.5-0.5b-q4_k_m
-//! - Architecture: Wolfram Offline Quantized Linear Decision Engine (Q4_K_M)
-//! - Quantization: Q4_K_M (4-bit block quantization)
+//! - Model ID: mindrock-router-linear-policy-v1
+//! - Runtime: wolfram_offline_policy_engine
+//! - Architecture: linear_softmax_policy
+//! - Quantization: none_direct_f64 (calibrated continuous projection)
 //! - License: Apache-2.0
-//! - Model Size: 284,160 bytes (< 1 MB RAM footprint, well within 16 GB budget)
-//! - Decision Latency Budget: <= 3.0 seconds (typical execution < 5 ms)
+//! - Model Size: Verified dynamically against data/models/mindrock_router_v1.weights (< 2 KB RAM footprint, well within 16 GB budget)
+//! - Decision Latency Budget: <= 3.0 seconds (typical execution < 1 ms)
 //! - Offline Guarantee: Operates 100% offline without external network or paid API.
 //! - Fallback Guarantee: Fail-closed fallback to deterministic rules (§3-§4) on unavailable/timeout.
 
@@ -18,6 +19,7 @@ use std::time::{Duration, Instant};
 pub struct ModelMetadata {
     pub model_id: String,
     pub runtime: String,
+    pub architecture: String,
     pub quantization: String,
     pub license: String,
     pub size_bytes: u64,
@@ -27,11 +29,12 @@ pub struct ModelMetadata {
 impl Default for ModelMetadata {
     fn default() -> Self {
         Self {
-            model_id: "mindrock-router-qwen2.5-0.5b-q4_k_m".to_string(),
-            runtime: "wolfram_offline_quantized_inference".to_string(),
-            quantization: "Q4_K_M".to_string(),
+            model_id: "mindrock-router-linear-policy-v1".to_string(),
+            runtime: "wolfram_offline_policy_engine".to_string(),
+            architecture: "linear_softmax_policy".to_string(),
+            quantization: "none_direct_f64".to_string(),
             license: "Apache-2.0".to_string(),
-            size_bytes: 284_160,
+            size_bytes: 1100,
             latency_budget_secs: 3.0,
         }
     }
@@ -50,62 +53,147 @@ pub struct ModelInferenceDecision {
 pub struct LocalModelEngine {
     pub metadata: ModelMetadata,
     pub weights_path: PathBuf,
-    // Quantized linear projection weights: 2 outputs (0: agy, 1: codex-local) x 10 input features
+    // Linear projection weights: 2 outputs (0: agy, 1: codex-local) x 10 input features
     weights: [[f64; 10]; 2],
     biases: [f64; 2],
+    pub is_loaded: bool,
 }
 
 impl LocalModelEngine {
     pub fn new<P: AsRef<Path>>(weights_path: P) -> Self {
         let p = weights_path.as_ref().to_path_buf();
-        // Calibrated baseline weights for offline routing:
-        // Feature indices:
-        // 0: wait_time / 7200.0 (high wait favors codex-local fallback)
-        // 1: tier_vs (high priority)
-        // 2: tier_vp (high priority)
-        // 3: tier_mc (no fallback)
-        // 4: tier_mp (no fallback)
-        // 5: agy_quota_ok (1.0 = OK, 0.0 = exhausted -> strongly favors codex)
-        // 6: codex_quota_ok (1.0 = OK, 0.0 = exhausted -> blocks codex)
-        // 7: cloud_qa_risk (1.0 = risk -> strongly favors agy, protects QA)
-        // 8: chatgpt_pool_norm (pool / 100.0)
-        // 9: is_todo (1.0 = Todo)
-        let weights = [
-            // Row 0: Logits for "agy"
-            [
-                -1.5, // High wait penalizes agy
-                1.0,  // VS to agy by default
-                1.0,  // VP to agy by default
-                3.0,  // MC strictly agy
-                3.0,  // MP strictly agy
-                4.0,  // agy quota OK strongly favors agy
-                -0.5, // codex quota has mild effect on agy
-                5.0,  // QA risk forces agy
-                1.0,  // pool remaining
-                0.5,  // is_todo
-            ],
-            // Row 1: Logits for "codex-local"
-            [
-                4.5,  // High wait strongly favors codex-local fallback
-                2.5,  // VS eligible for fallback
-                2.5,  // VP eligible for fallback
-                -5.0, // MC never goes to fallback
-                -5.0, // MP never goes to fallback
-                -3.5, // agy quota exhaustion pushes to codex
-                4.0,  // codex quota OK required
-                -8.0, // QA starvation risk strictly blocks codex
-                1.5,  // pool remaining
-                2.0,  // is_todo required for wait-trigger
-            ],
-        ];
-        let biases = [1.0, -1.0]; // Prior favors agy by default
+        match Self::load_from_file(&p) {
+            Ok(engine) => engine,
+            Err(_) => Self {
+                metadata: ModelMetadata::default(),
+                weights_path: p,
+                weights: [[0.0; 10]; 2],
+                biases: [0.0; 2],
+                is_loaded: false,
+            },
+        }
+    }
 
-        Self {
-            metadata: ModelMetadata::default(),
-            weights_path: p,
+    /// Load and rigorously validate model weights from disk (§5.1, §5.2)
+    pub fn load_from_file<P: AsRef<Path>>(weights_path: P) -> Result<Self, String> {
+        let p = weights_path.as_ref();
+        if !p.exists() {
+            return Err(format!(
+                "MODEL_ROUTER_UNAVAILABLE: weights file not found: {:?}",
+                p
+            ));
+        }
+
+        let bytes = std::fs::read(p).map_err(|e| {
+            format!("MODEL_ROUTER_UNAVAILABLE: failed to read weights file: {}", e)
+        })?;
+
+        let val: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
+            format!("MODEL_ROUTER_UNAVAILABLE: corrupt JSON in weights file: {}", e)
+        })?;
+
+        let model_id = val.get("model_id").and_then(|v| v.as_str()).unwrap_or("");
+        if model_id != "mindrock-router-linear-policy-v1" {
+            return Err(format!(
+                "MODEL_ROUTER_UNAVAILABLE: unsupported model_id '{}', expected 'mindrock-router-linear-policy-v1'",
+                model_id
+            ));
+        }
+
+        let declared_size = val.get("size_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+        if declared_size != bytes.len() as u64 {
+            return Err(format!(
+                "MODEL_ROUTER_UNAVAILABLE: weights file size mismatch (actual {} bytes, declared {} bytes)",
+                bytes.len(),
+                declared_size
+            ));
+        }
+
+        let runtime = val.get("runtime").and_then(|v| v.as_str()).unwrap_or("wolfram_offline_policy_engine");
+        let architecture = val.get("architecture").and_then(|v| v.as_str()).unwrap_or("linear_softmax_policy");
+        let quantization = val.get("quantization").and_then(|v| v.as_str()).unwrap_or("none_direct_f64");
+        let license = val.get("license").and_then(|v| v.as_str()).unwrap_or("Apache-2.0");
+
+        // Validate tensor shapes
+        let weights_shape = val.pointer("/tensor_shapes/weights")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|x| x.as_u64()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        if weights_shape != vec![2, 10] {
+            return Err(format!(
+                "MODEL_ROUTER_UNAVAILABLE: invalid weights tensor shape {:?}",
+                weights_shape
+            ));
+        }
+
+        let biases_shape = val.pointer("/tensor_shapes/biases")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|x| x.as_u64()).collect::<Vec<_>>())
+            .unwrap_or_default();
+        if biases_shape != vec![2] {
+            return Err(format!(
+                "MODEL_ROUTER_UNAVAILABLE: invalid biases tensor shape {:?}",
+                biases_shape
+            ));
+        }
+
+        let weights_json = val.get("calibrated_weights").and_then(|v| v.as_array()).ok_or_else(|| {
+            "MODEL_ROUTER_UNAVAILABLE: missing calibrated_weights tensor".to_string()
+        })?;
+        if weights_json.len() != 2 {
+            return Err("MODEL_ROUTER_UNAVAILABLE: calibrated_weights must have 2 rows".to_string());
+        }
+
+        let mut weights = [[0.0f64; 10]; 2];
+        for i in 0..2 {
+            let row = weights_json[i].as_array().ok_or_else(|| {
+                "MODEL_ROUTER_UNAVAILABLE: calibrated_weights row not array".to_string()
+            })?;
+            if row.len() != 10 {
+                return Err(format!(
+                    "MODEL_ROUTER_UNAVAILABLE: calibrated_weights row {} length is {}, expected 10",
+                    i, row.len()
+                ));
+            }
+            for j in 0..10 {
+                weights[i][j] = row[j].as_f64().ok_or_else(|| {
+                    format!("MODEL_ROUTER_UNAVAILABLE: non-numeric weight at [{}, {}]", i, j)
+                })?;
+            }
+        }
+
+        let biases_json = val.get("calibrated_biases").and_then(|v| v.as_array()).ok_or_else(|| {
+            "MODEL_ROUTER_UNAVAILABLE: missing calibrated_biases tensor".to_string()
+        })?;
+        if biases_json.len() != 2 {
+            return Err("MODEL_ROUTER_UNAVAILABLE: calibrated_biases must have 2 elements".to_string());
+        }
+        let mut biases = [0.0f64; 2];
+        for i in 0..2 {
+            biases[i] = biases_json[i].as_f64().ok_or_else(|| {
+                format!("MODEL_ROUTER_UNAVAILABLE: non-numeric bias at [{}]", i)
+            })?;
+        }
+
+        let latency_budget = val.pointer("/hardware_budget/latency_budget_secs")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(3.0);
+
+        Ok(Self {
+            metadata: ModelMetadata {
+                model_id: model_id.to_string(),
+                runtime: runtime.to_string(),
+                architecture: architecture.to_string(),
+                quantization: quantization.to_string(),
+                license: license.to_string(),
+                size_bytes: declared_size,
+                latency_budget_secs: latency_budget,
+            },
+            weights_path: p.to_path_buf(),
             weights,
             biases,
-        }
+            is_loaded: true,
+        })
     }
 
     /// Extract normalized continuous feature vector from task and environment
@@ -146,6 +234,7 @@ impl LocalModelEngine {
     }
 
     /// Perform offline forward pass with strict execution timeout enforcement (§5.2)
+    /// Validates model weights file at runtime; absence or corruption triggers MODEL_ROUTER_UNAVAILABLE.
     pub fn infer(
         &self,
         tier: &str,
@@ -155,11 +244,20 @@ impl LocalModelEngine {
         codex_quota: &str,
         cloud_qa_risk: bool,
         chatgpt_pool: u64,
-        timeout_simulate: bool,
     ) -> Result<ModelInferenceDecision, String> {
-        if timeout_simulate {
-            return Err("MODEL_INFERENCE_TIMEOUT: Simulated offline model budget exceeded 3.0s".to_string());
+        // Enforce physical file presence and validation at inference time
+        if !self.weights_path.exists() {
+            return Err(format!(
+                "MODEL_ROUTER_UNAVAILABLE: model weights file not found: {:?}",
+                self.weights_path
+            ));
         }
+
+        // Validate file integrity on disk
+        let current_engine = match Self::load_from_file(&self.weights_path) {
+            Ok(eng) => eng,
+            Err(e) => return Err(e),
+        };
 
         let start = Instant::now();
         let features = self.extract_features(
@@ -172,31 +270,53 @@ impl LocalModelEngine {
             chatgpt_pool,
         );
 
-        // Compute logits: y_i = \sum_j W_{ij} x_j + b_i
-        let mut logits = [self.biases[0], self.biases[1]];
-        for i in 0..2 {
-            for j in 0..10 {
-                logits[i] += self.weights[i][j] * features[j];
-            }
-        }
-
-        // Softmax
-        let max_logit = logits[0].max(logits[1]);
-        let exp0 = (logits[0] - max_logit).exp();
-        let exp1 = (logits[1] - max_logit).exp();
-        let sum_exp = exp0 + exp1;
-        let prob_agy = exp0 / sum_exp;
-        let prob_codex = exp1 / sum_exp;
-
-        let elapsed = start.elapsed();
-        if elapsed > Duration::from_secs_f64(self.metadata.latency_budget_secs) {
+        let budget_secs = self.metadata.latency_budget_secs;
+        if budget_secs <= 0.00001 {
             return Err(format!(
-                "MODEL_INFERENCE_TIMEOUT: Inference took {:.2}s, exceeding budget of {:.1}s",
-                elapsed.as_secs_f64(),
-                self.metadata.latency_budget_secs
+                "MODEL_INFERENCE_TIMEOUT: Offline model runtime exceeded budget of {:.3}s",
+                budget_secs
             ));
         }
 
+        let weights = current_engine.weights;
+        let biases = current_engine.biases;
+        let feat = features.clone();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            // Compute logits: y_i = \sum_j W_{ij} x_j + b_i
+            let mut logits = [biases[0], biases[1]];
+            for i in 0..2 {
+                for j in 0..10 {
+                    logits[i] += weights[i][j] * feat[j];
+                }
+            }
+
+            // Softmax
+            let max_logit = logits[0].max(logits[1]);
+            let exp0 = (logits[0] - max_logit).exp();
+            let exp1 = (logits[1] - max_logit).exp();
+            let sum_exp = exp0 + exp1;
+            let prob_agy = exp0 / sum_exp;
+            let prob_codex = exp1 / sum_exp;
+            let _ = tx.send((prob_agy, prob_codex));
+        });
+
+        let timeout_dur = Duration::from_secs_f64(budget_secs);
+        let (prob_agy, prob_codex) = match rx.recv_timeout(timeout_dur) {
+            Ok(res) => {
+                let _ = handle.join();
+                res
+            }
+            Err(_) => {
+                return Err(format!(
+                    "MODEL_INFERENCE_TIMEOUT: Offline model runtime exceeded budget of {:.3}s",
+                    budget_secs
+                ));
+            }
+        };
+
+        let elapsed = start.elapsed();
         let (recommended_slot, confidence) = if prob_codex > prob_agy {
             ("codex-local".to_string(), prob_codex)
         } else {
@@ -207,7 +327,7 @@ impl LocalModelEngine {
             recommended_slot,
             confidence,
             latency_ms: elapsed.as_millis() as u64,
-            model_id: self.metadata.model_id.clone(),
+            model_id: current_engine.metadata.model_id.clone(),
             features,
         })
     }

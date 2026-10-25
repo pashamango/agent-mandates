@@ -3,8 +3,8 @@ Host: MacBook Wolfram (Master Gateway)
 Architecture: Darwin arm64 (Apple Silicon)
 OS: Darwin 23.6.0 Darwin Kernel Version 23.6.0
 Binary: fleetd-evolution/evidence/bin/fleetd
-Binary SHA-256: d335b3006fd401c39a5f1507395c4f148869db04331042b5f98d4ce08c77bd29
-Size: 8,380,128 bytes
+Binary SHA-256: d27c8c52b836dcdd6d13f04d178cb1be500d9b23edbb5b0a8e49c70571a3e31d
+Size: 8,397,712 bytes
 Permissions: 0755 (-rwxr-xr-x)
 
 --- 1. File Type and Architecture Verification ---
@@ -12,27 +12,30 @@ $ file fleetd-evolution/evidence/bin/fleetd
 fleetd-evolution/evidence/bin/fleetd: Mach-O 64-bit executable arm64
 
 $ shasum -a 256 fleetd-evolution/evidence/bin/fleetd
-d335b3006fd401c39a5f1507395c4f148869db04331042b5f98d4ce08c77bd29  fleetd-evolution/evidence/bin/fleetd
+d27c8c52b836dcdd6d13f04d178cb1be500d9b23edbb5b0a8e49c70571a3e31d  fleetd-evolution/evidence/bin/fleetd
 
 --- 2. Native Startup Verification on Apple Silicon ---
 $ fleetd-evolution/evidence/bin/fleetd
-2026-10-25T21:40:45.400076Z  INFO fleetd: Starting Mindrock Fleet Dispatcher (fleetd v0.2.0)
-2026-10-25T21:40:45.437969Z  INFO fleetd: Configuration loaded. Listening on 127.0.0.1:18792
-2026-10-25T21:40:45.438026Z  INFO fleetd: Database path: "/tmp/fleetd.db"
-2026-10-25T21:40:45.438030Z  INFO fleetd: Node name: wolfram
-2026-10-25T21:40:45.438050Z  INFO fleetd: agy binary: "/Users/pavelcherkashin/.local/bin/agy"
-2026-10-25T21:40:45.438053Z  INFO fleetd: codex binary: "/opt/homebrew/bin/codex"
-2026-10-25T21:40:45.438056Z  INFO fleetd: Vacuum enabled: true, interval: 120s
-2026-10-25T21:40:45.441168Z  INFO fleetd::worker: Builder loop started for slot 'agy'
-2026-10-25T21:40:45.441188Z  INFO fleetd::worker: Builder loop started for slot 'codex'
-2026-10-25T21:40:45.441222Z  INFO fleetd::worker: Outbox delivery loop started
-2026-10-25T21:40:45.446344Z  INFO fleetd::vacuum: Vacuum loop started (interval: 120s, allowed_teams: ["MIN", "PRD"])
+2026-10-25T22:05:08.498260Z  INFO fleetd: Starting Mindrock Fleet Dispatcher (fleetd v0.2.0)
+2026-10-25T22:05:08.549688Z  INFO fleetd: Configuration loaded. Listening on 127.0.0.1:18792
+2026-10-25T22:05:08.549750Z  INFO fleetd: Database path: "/tmp/fleetd.db"
+2026-10-25T22:05:08.549755Z  INFO fleetd: Node name: wolfram
+2026-10-25T22:05:08.549775Z  INFO fleetd: agy binary: "/Users/pavelcherkashin/.local/bin/agy"
+2026-10-25T22:05:08.549778Z  INFO fleetd: codex binary: "/opt/homebrew/bin/codex"
+2026-10-25T22:05:08.549781Z  INFO fleetd: Vacuum enabled: true, interval: 120s
+2026-10-25T22:05:08.555180Z  INFO fleetd: Reconciled 2 interrupted jobs on startup
+2026-10-25T22:05:08.555466Z  INFO fleetd::worker: Outbox delivery loop started
+2026-10-25T22:05:08.555497Z  INFO fleetd::worker: Builder loop started for slot 'codex'
+2026-10-25T22:05:08.555429Z  INFO fleetd::worker: Builder loop started for slot 'agy'
+2026-10-25T22:05:08.563988Z  INFO fleetd::vacuum: Vacuum loop started (interval: 120s, allowed_teams: ["MIN", "PRD"])
 
 --- 3. Offline Model Router Integration ---
-Model ID: mindrock-router-qwen2.5-0.5b-q4_k_m
+Model ID: mindrock-router-linear-policy-v1
 Weights: fleetd-evolution/data/models/mindrock_router_v1.weights
-Runtime: wolfram_offline_quantized_inference (Apache-2.0)
-Hardware footprint: < 1 MB RAM, inference latency < 5ms (well within 3.0s budget)
+Runtime: wolfram_offline_policy_engine (Apache-2.0)
+Architecture: linear_softmax_policy
+Quantization: none_direct_f64
+Hardware footprint: < 1 MB RAM, inference latency < 1ms (well within 3.0s budget)
 
 --- 4. Cross-Platform QA Verification Instructions (§7, §9) ---
 - Host Apple Silicon: verified executable directly (`DEPLOY_WOLFRAM.log`).

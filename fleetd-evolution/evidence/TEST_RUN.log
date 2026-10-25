@@ -1,25 +1,13 @@
-=== Python Acceptance Suite (9/9 passed) ===
-test_acceptance_1_task_without_project ... ok
-test_acceptance_2_task_without_tier ... ok
-test_acceptance_3_task_mp_submitted_frozen_and_status_check ... ok
-test_acceptance_4_fallback_triggers_time_and_quota ... ok
-test_acceptance_5_double_claim_simulation_and_durable_lease ... ok
-test_acceptance_6_quota_exhaustion_fail_closed ... ok
-test_acceptance_7_local_model_active_decision_and_timeout_fallback ... ok
-test_acceptance_8_historical_incident_metrics_and_rollback ... ok
-test_acceptance_9_zero_trust_git_handoff_pilot_and_manifest ... ok
-Ran 9 tests in 7.886s - OK
-
-=== Rust Integration Suite (10/10 passed) ===
 running 10 tests
+test test_rust_acceptance_1_task_without_project ... ok
 test test_rust_acceptance_2_task_without_tier ... ok
 test test_rust_acceptance_6_quota_exhaustion_and_pilot_fail_closed ... ok
-test test_rust_acceptance_1_task_without_project ... ok
 test test_rust_acceptance_3_submitted_frozen_and_status ... ok
-test test_rust_acceptance_7_model_decision_and_deterministic_fallback ... ok
 test test_rust_acceptance_5_double_claim_and_durable_lease ... ok
 test test_rust_acceptance_4_fallback_triggers ... ok
+test test_rust_acceptance_7_model_decision_and_deterministic_fallback ... ok
 test test_rust_acceptance_8_historical_cases ... ok
 test test_rust_acceptance_9_zero_trust_lease_and_gate_properties ... ok
 test test_rust_acceptance_10_daemon_integration_webhook_and_vacuum ... ok
-test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.89s
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.79s

@@ -175,7 +175,7 @@ pub async fn handle_webhook(
             wait_time_secs,
         };
 
-        let decision = state.router.route_and_claim_task(&task_cand, 3600, false, handoff_commit.as_deref());
+        let decision = state.router.route_and_claim_task(&task_cand, 3600, handoff_commit.as_deref());
         if !decision.success {
             info!("Webhook rejected task {} via vNext: {}", info.identifier, decision.reason);
             if let Some(rework_msg) = &decision.rework_comment {

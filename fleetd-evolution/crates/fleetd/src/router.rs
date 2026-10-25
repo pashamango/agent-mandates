@@ -44,6 +44,27 @@ pub struct SmartRouter {
     pub model_engine: LocalModelEngine,
 }
 
+pub fn resolve_model_weights_path() -> std::path::PathBuf {
+    if let Ok(env_path) = std::env::var("FLEETD_MODEL_WEIGHTS_PATH") {
+        if std::path::Path::new(&env_path).exists() {
+            return std::path::PathBuf::from(env_path);
+        }
+    }
+    let candidate_paths = [
+        "fleetd-evolution/data/models/mindrock_router_v1.weights",
+        "data/models/mindrock_router_v1.weights",
+        "../../data/models/mindrock_router_v1.weights",
+        "../data/models/mindrock_router_v1.weights",
+        "../../fleetd-evolution/data/models/mindrock_router_v1.weights",
+    ];
+    for p in candidate_paths {
+        if std::path::Path::new(p).exists() {
+            return std::path::PathBuf::from(p);
+        }
+    }
+    std::path::PathBuf::from("fleetd-evolution/data/models/mindrock_router_v1.weights")
+}
+
 impl SmartRouter {
     pub fn new(
         pacing_secs: u64,
@@ -59,6 +80,7 @@ impl SmartRouter {
         healths.insert("agy".to_string(), "HEALTH_OK".to_string());
         healths.insert("codex-local".to_string(), "HEALTH_OK".to_string());
 
+        let weights_path = resolve_model_weights_path();
         Self {
             pacing_secs,
             last_agy_start: Mutex::new(0.0),
@@ -67,7 +89,7 @@ impl SmartRouter {
             pilot_passed: Mutex::new(pilot_passed),
             lease_manager,
             ledger,
-            model_engine: LocalModelEngine::new("fleetd-evolution/data/models/mindrock_router_v1.weights"),
+            model_engine: LocalModelEngine::new(weights_path),
         }
     }
 
@@ -195,28 +217,29 @@ impl SmartRouter {
                 return Err(format!("Slot probe exited with failure status: {}", status));
             }
 
-            // Read or verify handoff produced by the slot
+            // Read and strictly verify handoff receipt produced by the slot (§6.1)
             let handoff_file = probe_path.join("evidence").join("HANDOFF.json");
-            let commit_sha = if handoff_file.exists() {
-                let content = std::fs::read_to_string(&handoff_file).map_err(|e| e.to_string())?;
-                let v: serde_json::Value = serde_json::from_str(&content).map_err(|e| e.to_string())?;
-                v.get("commit_sha").and_then(|s| s.as_str()).map(|s| s.to_string()).unwrap_or_default()
-            } else {
-                let rev = std::process::Command::new("git")
-                    .current_dir(probe_path)
-                    .args(&["rev-parse", "HEAD"])
-                    .output()
-                    .map_err(|e| e.to_string())?;
-                String::from_utf8_lossy(&rev.stdout).trim().to_string()
-            };
+            if !handoff_file.exists() {
+                return Err("Missing required evidence/HANDOFF.json receipt from slot probe".to_string());
+            }
 
-            if commit_sha.len() != 40 || !commit_sha.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err(format!("Invalid commit SHA produced by slot: '{}'", commit_sha));
+            let content = std::fs::read_to_string(&handoff_file).map_err(|e| format!("Failed to read handoff receipt: {}", e))?;
+            let v: serde_json::Value = serde_json::from_str(&content).map_err(|e| format!("Corrupted handoff JSON: {}", e))?;
+
+            let repo_url = v.get("repo_url").and_then(|s| s.as_str()).unwrap_or("");
+            let branch = v.get("branch").and_then(|s| s.as_str()).unwrap_or("");
+            let commit_sha = v.get("commit_sha").and_then(|s| s.as_str()).unwrap_or("");
+
+            if repo_url.is_empty() || branch.is_empty() || commit_sha.len() != 40 || !commit_sha.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(format!(
+                    "Incomplete or invalid git handoff receipt: repo_url='{}', branch='{}', commit_sha='{}'",
+                    repo_url, branch, commit_sha
+                ));
             }
 
             // Verify clean clone and checkout reproducibility (§6.1)
             let clone_out = std::process::Command::new("git")
-                .args(&["clone", "--depth", "1", &format!("file://{}", probe_dir), &verify_dir])
+                .args(&["clone", "--depth", "1", repo_url, &verify_dir])
                 .output()
                 .map_err(|e| e.to_string())?;
             if !clone_out.status.success() {
@@ -367,7 +390,6 @@ impl SmartRouter {
     pub fn infer_local_model_decision(
         &self,
         task: &TaskCandidate,
-        timeout_simulate: bool,
     ) -> Option<ModelInferenceDecision> {
         let verdict = validate_canonical_rules(
             task.project.as_deref(),
@@ -397,7 +419,6 @@ impl SmartRouter {
             &codex_quota,
             cloud_qa_risk,
             chatgpt_pool,
-            timeout_simulate,
         ) {
             Ok(decision) => Some(decision),
             Err(err) => {
@@ -443,10 +464,9 @@ impl SmartRouter {
         &self,
         task: &TaskCandidate,
         lease_ttl_secs: u64,
-        model_timeout: bool,
         commit_sha: Option<&str>,
     ) -> RoutingDecision {
-        let model_decision = self.infer_local_model_decision(task, model_timeout);
+        let model_decision = self.infer_local_model_decision(task);
         let suggested_slot = match &model_decision {
             Some(dec) => Some(dec.recommended_slot.clone()),
             None => self.fallback_deterministic_routing(task),
@@ -470,7 +490,6 @@ impl SmartRouter {
         &self,
         task: &TaskCandidate,
         lease_ttl_secs: u64,
-        _model_timeout: bool,
         commit_sha: Option<&str>,
         model_fn: &dyn Fn(&TaskCandidate) -> Option<String>,
     ) -> RoutingDecision {
@@ -854,13 +873,18 @@ pub fn verify_manifest_root(manifest_path: &str) -> Result<String, String> {
     hasher.update(&bytes);
     let computed_manifest_sha = hex::encode(hasher.finalize());
 
-    if let Ok(trusted) = std::env::var("FLEETD_TRUSTED_MANIFEST_SHA256") {
-        if computed_manifest_sha != trusted {
-            return Err(format!(
-                "MANIFEST_ROOT_UNAUTHENTICATED: computed manifest hash {} does not match trusted {}",
-                computed_manifest_sha, trusted
-            ));
+    let trusted = match std::env::var("FLEETD_TRUSTED_MANIFEST_SHA256") {
+        Ok(t) if !t.trim().is_empty() => t.trim().to_string(),
+        _ => {
+            return Err("MANIFEST_ROOT_UNAUTHENTICATED: FLEETD_TRUSTED_MANIFEST_SHA256 root of trust is required but not set".to_string());
         }
+    };
+
+    if computed_manifest_sha != trusted {
+        return Err(format!(
+            "MANIFEST_ROOT_UNAUTHENTICATED: computed manifest hash {} does not match trusted {}",
+            computed_manifest_sha, trusted
+        ));
     }
     Ok(computed_manifest_sha)
 }
@@ -946,13 +970,29 @@ pub fn verify_pilot_receipt<P: AsRef<std::path::Path>>(receipt_path: P) -> (bool
         );
     }
 
-    // Verify authenticated reviewer identity (Codex Linear ID or authorized key)
+    // Verify authenticated reviewer identity (Codex Linear UUID)
     let reviewer = val.pointer("/independent_qa_audit/reviewer").and_then(|v| v.as_str()).unwrap_or("");
     let reviewer_id = val.pointer("/independent_qa_audit/reviewer_id").and_then(|v| v.as_str()).unwrap_or("");
-    let is_authorized_reviewer = (reviewer.contains("Codex") || reviewer.contains("Independent QA"))
-        && (reviewer_id.is_empty() || reviewer_id == "3bc09df8-b112-4d8d-8d0c-519043c77030");
-    if !is_authorized_reviewer {
-        return (false, format!("Reviewer '{}' (ID: '{}') is not authorized independent QA", reviewer, reviewer_id));
+    let authorized_reviewer_id = "3bc09df8-b112-4d8d-8d0c-519043c77030";
+
+    if reviewer_id.is_empty() || reviewer_id != authorized_reviewer_id {
+        return (
+            false,
+            format!(
+                "UNAUTHORIZED_REVIEWER: reviewer_id '{}' is missing or does not match authorized independent QA UUID '{}'",
+                reviewer_id, authorized_reviewer_id
+            ),
+        );
+    }
+
+    if !(reviewer.contains("Codex") || reviewer.contains("Independent QA")) {
+        return (
+            false,
+            format!(
+                "UNAUTHORIZED_REVIEWER: reviewer name '{}' does not match authorized independent QA",
+                reviewer
+            ),
+        );
     }
 
     let verdict = val.pointer("/independent_qa_audit/verdict").and_then(|v| v.as_str()).unwrap_or("");
@@ -1107,9 +1147,9 @@ pub fn evaluate_policy_metrics(
         }
 
         let decision = if let Some(custom_fn) = custom_model_decision {
-            router.route_and_claim_task_with_model(&task_cand, 3600, false, None, custom_fn)
+            router.route_and_claim_task_with_model(&task_cand, 3600, None, custom_fn)
         } else {
-            router.route_and_claim_task(&task_cand, 3600, false, None)
+            router.route_and_claim_task(&task_cand, 3600, None)
         };
 
         if item.agy_quota.is_some() {
@@ -1131,7 +1171,7 @@ pub fn evaluate_policy_metrics(
         }
 
         if decision.success {
-            let second_decision = router.route_and_claim_task(&task_cand, 3600, false, None);
+            let second_decision = router.route_and_claim_task(&task_cand, 3600, None);
             if second_decision.success {
                 double_claims += 1;
             }

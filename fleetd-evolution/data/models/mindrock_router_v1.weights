@@ -1,10 +1,11 @@
 {
-  "model_id": "mindrock-router-qwen2.5-0.5b-q4_k_m",
+  "model_id": "mindrock-router-linear-policy-v1",
   "version": "1.0.0",
-  "runtime": "wolfram_offline_quantized_inference",
-  "quantization": "Q4_K_M",
+  "runtime": "wolfram_offline_policy_engine",
+  "architecture": "linear_softmax_policy",
+  "quantization": "none_direct_f64",
   "license": "Apache-2.0",
-  "size_bytes": 284160,
+  "size_bytes": 1100,
   "hardware_budget": {
     "host": "wolfram",
     "ram_budget_mb": 50,
@@ -13,10 +14,18 @@
     "latency_budget_secs": 3.0
   },
   "tensor_shapes": {
-    "weights": [2, 10],
-    "biases": [2]
+    "weights": [
+      2,
+      10
+    ],
+    "biases": [
+      2
+    ]
   },
-  "classes": ["agy", "codex-local"],
+  "classes": [
+    "agy",
+    "codex-local"
+  ],
   "feature_mapping": [
     "wait_time_norm",
     "tier_vs",
@@ -30,8 +39,33 @@
     "is_todo"
   ],
   "calibrated_weights": [
-    [-1.5, 1.0, 1.0, 3.0, 3.0, 4.0, -0.5, 5.0, 1.0, 0.5],
-    [4.5, 2.5, 2.5, -5.0, -5.0, -3.5, 4.0, -8.0, 1.5, 2.0]
+    [
+      -1.5,
+      1.0,
+      1.0,
+      3.0,
+      3.0,
+      4.0,
+      -0.5,
+      5.0,
+      1.0,
+      0.5
+    ],
+    [
+      4.5,
+      2.5,
+      2.5,
+      -5.0,
+      -5.0,
+      -3.5,
+      4.0,
+      -8.0,
+      1.5,
+      2.0
+    ]
   ],
-  "calibrated_biases": [1.0, -1.0]
+  "calibrated_biases": [
+    1.0,
+    -1.0
+  ]
 }
