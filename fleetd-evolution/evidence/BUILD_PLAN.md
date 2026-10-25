@@ -50,10 +50,12 @@ cargo build --release --locked
 Логи компиляции зафиксированы в репозитории:
 - `fleetd-evolution/evidence/CARGO_BUILD.log`
 
-### Контрольная сумма собранного бинарника release:
+### Контрольная сумма и верификация бинарника release:
 ```text
-SHA256: 03a0fb402b27fb7c898f6db0d9d8292376b7a7fe3dd86b8b800556df07363fe9  fleetd
+SHA256: b7cd7ea4f25372b628a059ecb8dc875b1a73ac347a929b9e04be78bfcf06280a  fleetd-evolution/evidence/bin/fleetd
 ```
+
+Бинарник скомпилирован на MacBook Wolfram (Apple Silicon, aarch64-apple-darwin) и включён непосредственно в дерево репозитория (`fleetd-evolution/evidence/bin/fleetd`) с фиксацией в `MANIFEST.sha256`. Любой проверяющий из чистого клона может напрямую проверить контрольную сумму бинарника (`sha256sum -c MANIFEST.sha256`), а также пересобрать бинарник из исходников `crates/fleetd` на любой платформе (`cargo test --locked`, `cargo build --release --locked`).
 
 ---
 

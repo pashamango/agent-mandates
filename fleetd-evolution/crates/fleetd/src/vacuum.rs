@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
-use crate::canonical::{extract_project_from_text, validate_canonical_rules};
+use crate::canonical::validate_canonical_rules;
 use crate::config::Config;
 use crate::db::Database;
 use crate::linear::{parse_timestamp_secs, LinearClient};
@@ -97,9 +97,7 @@ pub async fn run_vacuum_loop(
                     }
 
                     // 1. Resolve actual task attributes (§4, §3.3)
-                    let resolved_project = candidate.project_name.clone().or_else(|| {
-                        extract_project_from_text(&format!("{}\n{}", candidate.title, candidate.description))
-                    });
+                    let resolved_project = candidate.project_name.clone();
 
                     let resolved_status = candidate.state_name.clone().or_else(|| {
                         match candidate.state_type.as_deref() {
@@ -167,10 +165,30 @@ pub async fn run_vacuum_loop(
                     );
 
                     // 1. Move to In Progress
-                    let _ = linear.set_in_progress(&candidate.id).await;
+                    if let Err(e) = linear.set_in_progress(&candidate.id).await {
+                        error!("Vacuum failed set_in_progress for {}: {}. Rolling back lease.", candidate.identifier, e);
+                        let _ = router.release_lease(&candidate.id);
+                        let _ = router.ledger.record_decision(serde_json::json!({
+                            "task_id": candidate.id,
+                            "event": "VACUUM_MUTATION_FAILED_LEASE_RELEASED",
+                            "step": "set_in_progress",
+                            "error": e.to_string(),
+                        }));
+                        continue;
+                    }
 
                     // 2. Assign to bot user
-                    let _ = linear.set_assignee(&candidate.id, &config.bot_user_id).await;
+                    if let Err(e) = linear.set_assignee(&candidate.id, &config.bot_user_id).await {
+                        error!("Vacuum failed set_assignee for {}: {}. Rolling back lease.", candidate.identifier, e);
+                        let _ = router.release_lease(&candidate.id);
+                        let _ = router.ledger.record_decision(serde_json::json!({
+                            "task_id": candidate.id,
+                            "event": "VACUUM_MUTATION_FAILED_LEASE_RELEASED",
+                            "step": "set_assignee",
+                            "error": e.to_string(),
+                        }));
+                        continue;
+                    }
 
                     // 3. Post claim comment
                     let claim_marker = format!("<!-- vacuum-claim:{} -->", candidate.id);
@@ -178,11 +196,21 @@ pub async fn run_vacuum_loop(
                         "🤖 **Vacuum Auto-Claim**\n{}\nProactively pulled from backlog into `In Progress` for autonomous builder `{}`.\nExecution started on Wolfram.",
                         claim_marker, slot_name
                     );
-                    let _ = linear.post_comment(&candidate.id, &claim_body).await;
+                    if let Err(e) = linear.post_comment(&candidate.id, &claim_body).await {
+                        error!("Vacuum failed post_comment for {}: {}. Rolling back lease.", candidate.identifier, e);
+                        let _ = router.release_lease(&candidate.id);
+                        let _ = router.ledger.record_decision(serde_json::json!({
+                            "task_id": candidate.id,
+                            "event": "VACUUM_MUTATION_FAILED_LEASE_RELEASED",
+                            "step": "post_comment",
+                            "error": e.to_string(),
+                        }));
+                        continue;
+                    }
 
                     // 4. Enqueue into DB
                     let delivery_id = format!("vacuum-{}", &uuid::Uuid::new_v4().simple().to_string()[..10]);
-                    let _ = db.enqueue_job(
+                    if let Err(e) = db.enqueue_job(
                         &delivery_id,
                         &candidate.id,
                         &candidate.identifier,
@@ -190,7 +218,16 @@ pub async fn run_vacuum_loop(
                         &candidate.description,
                         "START",
                         slot_name,
-                    );
+                    ) {
+                        error!("Vacuum failed enqueue_job for {}: {}. Rolling back lease.", candidate.identifier, e);
+                        let _ = router.release_lease(&candidate.id);
+                        let _ = router.ledger.record_decision(serde_json::json!({
+                            "task_id": candidate.id,
+                            "event": "VACUUM_ENQUEUE_FAILED_LEASE_RELEASED",
+                            "error": e.to_string(),
+                        }));
+                        continue;
+                    }
 
                     info!("Vacuum successfully claimed and enqueued {}", candidate.identifier);
                     // Claim at most one job per tick

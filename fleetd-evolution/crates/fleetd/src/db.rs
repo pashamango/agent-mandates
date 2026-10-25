@@ -108,6 +108,11 @@ impl Database {
         })
     }
 
+    pub fn execute_raw(&self, sql: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(sql, [])
+    }
+
     pub fn record_inbox(
         &self,
         delivery_id: &str,

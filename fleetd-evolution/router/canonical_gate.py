@@ -95,18 +95,14 @@ def validate_canonical_rules(task: Dict[str, Any]) -> CanonicalVerdict:
     title = task.get("title", "") or ""
     combined_text = f"{title}\n{description}"
 
-    # 1. Project mandatory check
+    # 1. Project mandatory check: Structured Linear Project binding is mandatory (§4.1)
     project = task.get("project")
     if not project or (isinstance(project, str) and not project.strip()):
-        extracted_p = extract_project_from_text(combined_text)
-        if extracted_p:
-            project = extracted_p
-        else:
-            return CanonicalVerdict(
-                passed=False,
-                reason="MISSING_PROJECT",
-                rework_comment="@PM REWORK: Задача не привязана к Linear Project. Привязка к проекту обязательна для выдачи билдеру.",
-            )
+        return CanonicalVerdict(
+            passed=False,
+            reason="MISSING_PROJECT",
+            rework_comment="@PM REWORK: Задача не привязана к Linear Project. Привязка к проекту обязательна для выдачи билдеру.",
+        )
 
     # 2. Tier mandatory check
 

@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+use sha2::{Digest, Sha256};
 
 use crate::canonical::validate_canonical_rules;
 use crate::lease::DurableLeaseManager;
@@ -92,6 +93,10 @@ impl SmartRouter {
         }
     }
 
+    pub fn release_lease(&self, task_id: &str) -> Result<(), String> {
+        self.lease_manager.release_lease(task_id)
+    }
+
     pub fn refresh_pilot_gate<P: AsRef<std::path::Path>>(&self, receipt_path: P) -> bool {
         let (passed, _) = verify_pilot_receipt(receipt_path);
         self.set_pilot_passed(passed);
@@ -102,35 +107,162 @@ impl SmartRouter {
         let p = codex_bin.as_ref();
         if !p.exists() {
             self.set_slot_health("codex-local", "HEALTH_FAILED");
+            let _ = self.ledger.record_decision(serde_json::json!({
+                "event": "SLOT_HEALTH_CHECK_FAILED",
+                "slot": "codex-local",
+                "reason": format!("Binary not found: {:?}", p),
+            }));
             return;
         }
-        let output = std::process::Command::new(p)
-            .arg("--version")
-            .output();
-        match output {
-            Ok(o) if o.status.success() => {
+
+        // 1. Version check
+        let version_ok = match std::process::Command::new(p).arg("--version").output() {
+            Ok(o) => o.status.success(),
+            Err(_) => false,
+        };
+        if !version_ok {
+            self.set_slot_health("codex-local", "HEALTH_FAILED");
+            let _ = self.ledger.record_decision(serde_json::json!({
+                "event": "SLOT_HEALTH_CHECK_FAILED",
+                "slot": "codex-local",
+                "reason": "CLI --version check failed",
+            }));
+            return;
+        }
+
+        // 2. Git handoff capability probe (accept task, work in isolated repo, generate commit SHA)
+        let probe_dir = format!(
+            "/tmp/codex_health_git_probe_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let probe_path = std::path::Path::new(&probe_dir);
+        let probe_res = (|| -> Result<(), String> {
+            std::fs::create_dir_all(probe_path).map_err(|e| e.to_string())?;
+            let init = std::process::Command::new("git")
+                .arg("init")
+                .arg(&probe_dir)
+                .output()
+                .map_err(|e| e.to_string())?;
+            if !init.status.success() {
+                return Err("git init failed".to_string());
+            }
+
+            let task_file = probe_path.join("task.json");
+            std::fs::write(&task_file, b"{\"probe\": true, \"slot\": \"codex-local\"}")
+                .map_err(|e| e.to_string())?;
+
+            let add = std::process::Command::new("git")
+                .current_dir(probe_path)
+                .args(&["add", "task.json"])
+                .output()
+                .map_err(|e| e.to_string())?;
+            if !add.status.success() {
+                return Err("git add failed".to_string());
+            }
+
+            let commit = std::process::Command::new("git")
+                .current_dir(probe_path)
+                .args(&[
+                    "-c", "user.name=HealthCheck",
+                    "-c", "user.email=health@mindrock.capital",
+                    "commit", "-m", "health check task probe",
+                ])
+                .output()
+                .map_err(|e| e.to_string())?;
+            if !commit.status.success() {
+                return Err("git commit failed".to_string());
+            }
+
+            let rev = std::process::Command::new("git")
+                .current_dir(probe_path)
+                .args(&["rev-parse", "HEAD"])
+                .output()
+                .map_err(|e| e.to_string())?;
+            if !rev.status.success() {
+                return Err("git rev-parse HEAD failed".to_string());
+            }
+
+            let sha = String::from_utf8_lossy(&rev.stdout).trim().to_string();
+            if sha.len() != 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err(format!("Invalid commit SHA: {}", sha));
+            }
+
+            Ok(())
+        })();
+
+        let _ = std::fs::remove_dir_all(probe_path);
+
+        match probe_res {
+            Ok(()) => {
                 self.set_slot_health("codex-local", "HEALTH_OK");
             }
-            _ => {
+            Err(e) => {
                 self.set_slot_health("codex-local", "HEALTH_FAILED");
+                let _ = self.ledger.record_decision(serde_json::json!({
+                    "event": "SLOT_HEALTH_CHECK_FAILED",
+                    "slot": "codex-local",
+                    "reason": format!("Git handoff probe failed: {}", e),
+                }));
             }
         }
     }
 
     pub fn refresh_quota_signals<P: AsRef<std::path::Path>>(&self, signals_path: P) {
         let p = signals_path.as_ref();
-        if p.exists() {
-            if let Ok(content) = std::fs::read_to_string(p) {
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(agy) = val.get("agy").and_then(|v| v.as_str()) {
-                        self.set_slot_quota("agy", agy);
-                    }
-                    if let Some(codex) = val.get("codex-local").and_then(|v| v.as_str()) {
-                        self.set_slot_quota("codex-local", codex);
-                    }
-                }
-            }
+        if !p.exists() {
+            let _ = self.ledger.record_decision(serde_json::json!({
+                "event": "QUOTA_SIGNALS_FILE_MISSING",
+                "path": p.to_string_lossy(),
+            }));
+            self.set_slot_quota("agy", "QUOTA_SOURCE_UNAVAILABLE");
+            self.set_slot_quota("codex-local", "QUOTA_SOURCE_UNAVAILABLE");
+            return;
         }
+
+        let content = match std::fs::read_to_string(p) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = self.ledger.record_decision(serde_json::json!({
+                    "event": "QUOTA_SIGNALS_READ_ERROR",
+                    "error": e.to_string(),
+                }));
+                self.set_slot_quota("agy", "QUOTA_SOURCE_UNAVAILABLE");
+                self.set_slot_quota("codex-local", "QUOTA_SOURCE_UNAVAILABLE");
+                return;
+            }
+        };
+
+        let val: serde_json::Value = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = self.ledger.record_decision(serde_json::json!({
+                    "event": "QUOTA_SIGNALS_PARSE_ERROR",
+                    "error": e.to_string(),
+                }));
+                self.set_slot_quota("agy", "QUOTA_SOURCE_UNAVAILABLE");
+                self.set_slot_quota("codex-local", "QUOTA_SOURCE_UNAVAILABLE");
+                return;
+            }
+        };
+
+        let agy = val.get("agy").and_then(|v| v.as_str()).unwrap_or("OK");
+        self.set_slot_quota("agy", agy);
+
+        let mut codex = val.get("codex-local").and_then(|v| v.as_str()).unwrap_or("OK").to_string();
+        // Section 3.4: Protect cloud QA ChatGPT pool from starvation by codex-local
+        let qa_starvation_risk = val.get("cloud_qa_starvation_risk").and_then(|v| v.as_bool()).unwrap_or(false);
+        let chatgpt_pool_remaining = val.get("chatgpt_pool_remaining").and_then(|v| v.as_u64()).unwrap_or(100);
+        if qa_starvation_risk || chatgpt_pool_remaining < 20 {
+            codex = "EXHAUSTED_TO_PROTECT_QA".to_string();
+            let _ = self.ledger.record_decision(serde_json::json!({
+                "event": "CODEX_LOCAL_THROTTLED_FOR_QA_RESERVE",
+                "chatgpt_pool_remaining": chatgpt_pool_remaining,
+            }));
+        }
+        self.set_slot_quota("codex-local", &codex);
     }
 
     pub fn is_pilot_passed(&self) -> bool {
@@ -425,10 +557,10 @@ impl SmartRouter {
             };
         }
 
-        // 6. Pacing check for agy
+        // 6. Pacing check for agy (minimum 300 seconds between ALL agy runs)
         let now = Self::now_secs();
         let last_start = self.last_agy_start.lock().map(|g| *g).unwrap_or(0.0);
-        if target_slot == "agy" && (now - last_start) < self.pacing_secs as f64 && task.wait_time_secs < 7200 {
+        if target_slot == "agy" && (now - last_start) < self.pacing_secs as f64 {
             if let Err(e) = self.ledger.record_decision(serde_json::json!({
                 "task_id": task.id,
                 "event": "PACING_BACKOFF",
@@ -480,11 +612,18 @@ impl SmartRouter {
                 }
             }
             Ok(Err(reason)) => {
-                let _ = self.ledger.record_decision(serde_json::json!({
+                if let Err(e) = self.ledger.record_decision(serde_json::json!({
                     "task_id": task.id,
                     "event": &reason,
                     "slot": target_slot,
-                }));
+                })) {
+                    return RoutingDecision {
+                        success: false,
+                        slot: None,
+                        reason: format!("LEDGER_RECORD_FAILED: {}", e),
+                        rework_comment: None,
+                    };
+                }
                 RoutingDecision {
                     success: false,
                     slot: None,
@@ -493,6 +632,18 @@ impl SmartRouter {
                 }
             }
             Err(e) => {
+                if let Err(le) = self.ledger.record_decision(serde_json::json!({
+                    "task_id": task.id,
+                    "event": "LEASE_ACQUIRE_ERROR",
+                    "error": &e,
+                })) {
+                    return RoutingDecision {
+                        success: false,
+                        slot: None,
+                        reason: format!("LEDGER_RECORD_FAILED: {}", le),
+                        rework_comment: None,
+                    };
+                }
                 RoutingDecision {
                     success: false,
                     slot: None,
@@ -504,23 +655,88 @@ impl SmartRouter {
     }
 }
 
+pub fn find_manifest_entry(filename: &str) -> Option<String> {
+    let candidate_paths = [
+        "fleetd-evolution/evidence/MANIFEST.sha256",
+        "evidence/MANIFEST.sha256",
+        "../../fleetd-evolution/evidence/MANIFEST.sha256",
+        "../../evidence/MANIFEST.sha256",
+    ];
+    for p in &candidate_paths {
+        if let Ok(content) = std::fs::read_to_string(p) {
+            for line in content.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() == 2 && parts[1].ends_with(filename) {
+                    return Some(parts[0].to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 pub fn verify_pilot_receipt<P: AsRef<std::path::Path>>(receipt_path: P) -> (bool, String) {
     let p = receipt_path.as_ref();
     if !p.exists() {
         return (false, format!("Receipt file not found: {:?}", p));
     }
-    let content = match std::fs::read_to_string(p) {
-        Ok(c) => c,
+    let bytes = match std::fs::read(p) {
+        Ok(b) => b,
         Err(e) => return (false, format!("Failed to read receipt: {}", e)),
     };
-    let val: serde_json::Value = match serde_json::from_str(&content) {
+
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let computed_sha = hex::encode(hasher.finalize());
+
+    let val: serde_json::Value = match serde_json::from_slice(&bytes) {
         Ok(v) => v,
         Err(e) => return (false, format!("Corrupted receipt JSON: {}", e)),
     };
+
+    let filename = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if let Some(expected_sha) = find_manifest_entry(filename) {
+        if computed_sha != expected_sha {
+            return (
+                false,
+                format!(
+                    "RECEIPT_CHECKSUM_MISMATCH: computed {} does not match manifest {}",
+                    computed_sha, expected_sha
+                ),
+            );
+        }
+    }
+
     let pilot_id = val.get("pilot_task_id").and_then(|v| v.as_str()).unwrap_or("");
     if pilot_id != "MIN-221" {
         return (false, format!("Unexpected pilot task ID: {}", pilot_id));
     }
+
+    // Verify git coordinates
+    let git_coords = val.get("git_coordinates");
+    let repo_url = git_coords.and_then(|g| g.get("repo_url")).and_then(|v| v.as_str()).unwrap_or("");
+    let branch = git_coords.and_then(|g| g.get("branch")).and_then(|v| v.as_str()).unwrap_or("");
+    let commit_sha = git_coords.and_then(|g| g.get("commit_sha")).and_then(|v| v.as_str()).unwrap_or("");
+
+    if repo_url != "https://github.com/pashamango/math.git"
+        || branch != "collatz-v0.1.0-m3"
+        || commit_sha != "16590a7574b188225896cdf99268bc476cbe18a3"
+    {
+        return (
+            false,
+            format!(
+                "Pilot git coordinates mismatch: repo={}, branch={}, commit={}",
+                repo_url, branch, commit_sha
+            ),
+        );
+    }
+
+    // Verify reviewer identity
+    let reviewer = val.pointer("/independent_qa_audit/reviewer").and_then(|v| v.as_str()).unwrap_or("");
+    if !reviewer.contains("Codex") && !reviewer.contains("Independent QA") {
+        return (false, format!("Reviewer '{}' is not independent QA", reviewer));
+    }
+
     let verdict = val.pointer("/independent_qa_audit/verdict").and_then(|v| v.as_str()).unwrap_or("");
     if verdict.eq_ignore_ascii_case("PASS") {
         (true, "PILOT_QA_PASS".to_string())
@@ -529,7 +745,7 @@ pub fn verify_pilot_receipt<P: AsRef<std::path::Path>>(receipt_path: P) -> (bool
     }
 }
 
-pub fn resolve_handoff_commit(cwd: Option<&std::path::Path>, issue_text: &str) -> Option<String> {
+pub fn resolve_handoff_commit(_cwd: Option<&std::path::Path>, issue_text: &str) -> Option<String> {
     if let Some(pos) = issue_text.find("commit_sha") {
         let after = &issue_text[pos + 10..];
         for word in after.split(|c: char| c == '"' || c == '\'' || c == '`' || c == ':' || c.is_whitespace()) {
@@ -543,20 +759,6 @@ pub fn resolve_handoff_commit(cwd: Option<&std::path::Path>, issue_text: &str) -
             return Some(word.to_string());
         }
     }
-
-    let path = cwd.unwrap_or_else(|| std::path::Path::new("."));
-    if let Ok(output) = std::process::Command::new("git")
-        .args(["-C", path.to_str().unwrap_or("."), "rev-parse", "HEAD"])
-        .output()
-    {
-        if output.status.success() {
-            let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Some(sha);
-            }
-        }
-    }
-
     None
 }
 

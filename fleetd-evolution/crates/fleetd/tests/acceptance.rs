@@ -324,22 +324,50 @@ fn test_rust_acceptance_9_zero_trust_lease_and_gate_properties() {
     assert!(!passed);
     assert!(reason.contains("FAIL"));
 
-    // Verify dynamic gate opening on simulated PASS receipt
+    // Verify dynamic gate opening on simulated PASS receipt with complete git coordinates and independent QA
     let pass_receipt = format!("{}/pass_receipt.json", dir);
     fs::write(
         &pass_receipt,
         serde_json::json!({
             "pilot_task_id": "MIN-221",
             "tier": "ВП",
+            "git_coordinates": {
+                "repo_url": "https://github.com/pashamango/math.git",
+                "branch": "collatz-v0.1.0-m3",
+                "commit_sha": "16590a7574b188225896cdf99268bc476cbe18a3"
+            },
             "independent_qa_audit": {
+                "reviewer": "Codex (Independent QA)",
                 "verdict": "PASS"
             }
         }).to_string(),
     ).unwrap();
-    let (pass_ok, _) = fleetd::router::verify_pilot_receipt(&pass_receipt);
-    assert!(pass_ok);
+    let (pass_ok, reason) = fleetd::router::verify_pilot_receipt(&pass_receipt);
+    assert!(pass_ok, "Expected pass_ok, got: {}", reason);
     router.refresh_pilot_gate(&pass_receipt);
     assert!(router.is_pilot_passed());
+
+    // Tamper-resistance verification: Modifying PILOT_MIN_221_RECEIPT.json fails checksum against manifest
+    let tampered_receipt = format!("{}/PILOT_MIN_221_RECEIPT.json", dir);
+    fs::write(
+        &tampered_receipt,
+        serde_json::json!({
+            "pilot_task_id": "MIN-221",
+            "tier": "ВП",
+            "git_coordinates": {
+                "repo_url": "https://github.com/pashamango/math.git",
+                "branch": "collatz-v0.1.0-m3",
+                "commit_sha": "16590a7574b188225896cdf99268bc476cbe18a3"
+            },
+            "independent_qa_audit": {
+                "reviewer": "Codex (Independent QA)",
+                "verdict": "PASS"
+            }
+        }).to_string(),
+    ).unwrap();
+    let (tampered_ok, tampered_reason) = fleetd::router::verify_pilot_receipt(&tampered_receipt);
+    assert!(!tampered_ok);
+    assert!(tampered_reason.contains("RECEIPT_CHECKSUM_MISMATCH"));
 
     // 9c: Commit SHA tracking in lease
     let ok = lease_mgr.acquire_lease("TASK-COMMIT", "agy", 3600, Some("deadbeef12345678901234567890123456789012")).unwrap();
@@ -460,7 +488,7 @@ async fn test_rust_acceptance_10_daemon_integration_webhook_and_vacuum() {
     let mut headers3 = HeaderMap::new();
     headers3.insert("Linear-Delivery", "deliv-3".parse().unwrap());
     let (status_dup, body_dup) = fleetd::server::handle_webhook(
-        app_state,
+        app_state.clone(),
         headers3,
         axum::body::Bytes::from(valid_payload.to_string()),
     ).await;
@@ -492,4 +520,113 @@ async fn test_rust_acceptance_10_daemon_integration_webhook_and_vacuum() {
     );
     assert!(!verdict.passed);
     assert_eq!(verdict.reason, "MISSING_PROJECT");
+
+    // 10e: Webhook path with missing status -> REJECTED with MISSING_STATUS
+    let missing_status_payload = serde_json::json!({
+        "type": "Issue",
+        "action": "create",
+        "data": {
+            "id": "ISSUE-NOSTATUS",
+            "identifier": "MIN-994",
+            "title": "Missing status task",
+            "description": "Builder: agy\nTier: ВП\nProject: fleetd self-evolution",
+            "projectName": "fleetd self-evolution",
+            "team": { "key": "MIN" },
+            "labels": [{ "name": "Builder: agy" }]
+        }
+    });
+    let mut headers4 = HeaderMap::new();
+    headers4.insert("Linear-Delivery", "deliv-4".parse().unwrap());
+    let (status_nostat, body_nostat) = fleetd::server::handle_webhook(
+        app_state.clone(),
+        headers4,
+        axum::body::Bytes::from(missing_status_payload.to_string()),
+    ).await;
+    assert_eq!(status_nostat, StatusCode::OK);
+    assert_eq!(body_nostat["status"], "rejected");
+    assert_eq!(body_nostat["reason"], "MISSING_STATUS");
+
+    // 10f: Webhook lease rollback upon enqueue failure (prevent lost tasks)
+    let (fail_lease_mgr, fail_ledger, fail_dir) = setup_env("acc10_fail");
+    let fail_router = Arc::new(SmartRouter::new(0, fail_lease_mgr.clone(), fail_ledger, true));
+    let bad_db_path = format!("{}/bad.db", fail_dir);
+    let bad_db = fleetd::db::Database::new(std::path::Path::new(&bad_db_path)).unwrap();
+    bad_db.execute_raw("DROP TABLE jobs").unwrap();
+
+    let fail_state = fleetd::server::AppState {
+        config: config.clone(),
+        db: bad_db,
+        router: fail_router.clone(),
+        linear: None,
+    };
+    let enqueue_fail_payload = serde_json::json!({
+        "type": "Issue",
+        "action": "create",
+        "data": {
+            "id": "ISSUE-ENQFAIL",
+            "identifier": "MIN-995",
+            "title": "Enqueue fail task",
+            "description": "Builder: agy\nTier: ВП\nProject: fleetd self-evolution\ncommit_sha: 16590a7574b188225896cdf99268bc476cbe18a3",
+            "projectName": "fleetd self-evolution",
+            "team": { "key": "MIN" },
+            "state": { "name": "Todo" },
+            "labels": [{ "name": "Builder: agy" }]
+        }
+    });
+    let mut headers5 = HeaderMap::new();
+    headers5.insert("Linear-Delivery", "deliv-5".parse().unwrap());
+    let (status_enq_fail, _) = fleetd::server::handle_webhook(
+        fail_state,
+        headers5,
+        axum::body::Bytes::from(enqueue_fail_payload.to_string()),
+    ).await;
+    assert_eq!(status_enq_fail, StatusCode::INTERNAL_SERVER_ERROR);
+    // Verify lease was released on failure so task is NOT lost!
+    assert!(fail_lease_mgr.get_lease("ISSUE-ENQFAIL").unwrap().is_none());
+
+    // 10g: Preservation of pacing for old tasks (> 7200s wait)
+    let (pacing_lease_mgr, pacing_ledger, _) = setup_env("acc10_pacing");
+    let pacing_router = SmartRouter::new(300, pacing_lease_mgr, pacing_ledger, false);
+    *pacing_router.last_agy_start.lock().unwrap() = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    let old_task = TaskCandidate {
+        id: "TASK-OLD".to_string(),
+        title: "Old task wait 3h".to_string(),
+        description: "Builder: agy\nTier: МС".to_string(),
+        project: Some("fleetd self-evolution".to_string()),
+        tier: Some("МС".to_string()),
+        status: Some("Todo".to_string()),
+        assignee: None,
+        wait_time_secs: 10800,
+    };
+    let dec_old = pacing_router.route_and_claim_task(&old_task, 3600, false, None);
+    assert!(!dec_old.success);
+    assert_eq!(dec_old.reason, "PACING_BACKOFF");
+
+    // 10h: Fail-closed quota ingestion and cloud QA pool protection
+    let (q_lease_mgr, q_ledger, q_dir) = setup_env("acc10_quota");
+    let q_router = SmartRouter::new(0, q_lease_mgr, q_ledger.clone(), false);
+    q_router.refresh_quota_signals("/nonexistent/quota.json");
+    assert_eq!(q_router.slot_quota_status.lock().unwrap().get("agy").unwrap(), "QUOTA_SOURCE_UNAVAILABLE");
+    let q_records = q_ledger.read_records().unwrap();
+    assert!(q_records.iter().any(|r| r["event"] == "QUOTA_SIGNALS_FILE_MISSING"));
+
+    let corrupt_q = format!("{}/corrupt.json", q_dir);
+    fs::write(&corrupt_q, b"INVALID_JSON{{").unwrap();
+    q_router.refresh_quota_signals(&corrupt_q);
+    assert_eq!(q_router.slot_quota_status.lock().unwrap().get("agy").unwrap(), "QUOTA_SOURCE_UNAVAILABLE");
+    let q_records2 = q_ledger.read_records().unwrap();
+    assert!(q_records2.iter().any(|r| r["event"] == "QUOTA_SIGNALS_PARSE_ERROR"));
+
+    let low_pool_q = format!("{}/low_pool.json", q_dir);
+    fs::write(&low_pool_q, serde_json::json!({
+        "agy": "OK",
+        "codex-local": "OK",
+        "chatgpt_pool_remaining": 10,
+        "cloud_qa_starvation_risk": true
+    }).to_string()).unwrap();
+    q_router.refresh_quota_signals(&low_pool_q);
+    assert_eq!(q_router.slot_quota_status.lock().unwrap().get("codex-local").unwrap(), "EXHAUSTED_TO_PROTECT_QA");
 }

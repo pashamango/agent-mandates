@@ -358,9 +358,9 @@ class SmartRouter:
             })
             return False, None, reason
 
-        # 7. Apply pacing interval for agy
+        # 7. Apply pacing interval for agy (all runs, regardless of wait_time_secs)
         agy_busy = (time.time() - self.last_agy_start) < self.pacing_secs
-        if target_slot == "agy" and agy_busy and wait_time_secs < 7200:
+        if target_slot == "agy" and agy_busy:
             self.ledger.record_decision({
                 "task_id": task_id,
                 "event": "PACING_BACKOFF",

@@ -45,6 +45,23 @@ async fn webhook_handler(
     (status, Json(body)).into_response()
 }
 
+fn resolve_data_path(rel_path: &str) -> std::path::PathBuf {
+    let p = std::path::Path::new(rel_path);
+    if p.exists() {
+        return p.to_path_buf();
+    }
+    let p2 = std::path::Path::new("../..").join(rel_path);
+    if p2.exists() {
+        return p2;
+    }
+    let stripped = rel_path.strip_prefix("fleetd-evolution/").unwrap_or(rel_path);
+    let p3 = std::path::Path::new("../../").join(stripped);
+    if p3.exists() {
+        return p3;
+    }
+    p.to_path_buf()
+}
+
 pub async fn handle_webhook(
     state: AppState,
     headers: HeaderMap,
@@ -129,14 +146,14 @@ pub async fn handle_webhook(
 
     // 5. Smart Router & Canonical Gate Enforcement (§3, §4, §5, §6)
     if cmd_type != "CANCEL" {
-        state.router.refresh_pilot_gate("fleetd-evolution/evidence/PILOT_MIN_221_RECEIPT.json");
+        let pilot_path = resolve_data_path("fleetd-evolution/evidence/PILOT_MIN_221_RECEIPT.json");
+        let quota_path = resolve_data_path("fleetd-evolution/data/quota_signals.json");
+        state.router.refresh_pilot_gate(&pilot_path);
         state.router.refresh_slot_health(&state.config.codex_bin);
-        state.router.refresh_quota_signals("fleetd-evolution/data/quota_signals.json");
+        state.router.refresh_quota_signals(&quota_path);
 
         let handoff_commit = crate::router::resolve_handoff_commit(None, &info.description);
-        let resolved_project = info.project.clone().or_else(|| {
-            crate::canonical::extract_project_from_text(&format!("{}\n{}", info.title, info.description))
-        });
+        let resolved_project = info.project.clone();
 
         let now_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -153,7 +170,7 @@ pub async fn handle_webhook(
             description: info.description.clone(),
             project: resolved_project,
             tier: None,
-            status: info.status.clone().or_else(|| Some("Todo".to_string())),
+            status: info.status.clone(),
             assignee: info.assignee.clone(),
             wait_time_secs,
         };
@@ -201,8 +218,14 @@ pub async fn handle_webhook(
                 )
             }
             Err(e) => {
-                warn!("Failed to enqueue job: {}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, serde_json::json!({ "error": "Database error" }))
+                warn!("Failed to enqueue job: {}. Rolling back lease.", e);
+                let _ = state.router.release_lease(&info.id);
+                let _ = state.router.ledger.record_decision(serde_json::json!({
+                    "task_id": info.id,
+                    "event": "ENQUEUE_FAILED_LEASE_RELEASED",
+                    "error": e.to_string(),
+                }));
+                (StatusCode::INTERNAL_SERVER_ERROR, serde_json::json!({ "error": "Database error", "details": e.to_string() }))
             }
         }
     } else {

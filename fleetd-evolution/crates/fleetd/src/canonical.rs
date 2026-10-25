@@ -123,11 +123,11 @@ pub fn validate_canonical_rules(
         );
     }
 
-    // 1. Mandatory Project check
+    // 1. Mandatory Project check: Structured Linear Project binding is mandatory (§4.1)
     let combined_text = format!("{}\n{}", title, description);
     let resolved_project: Option<String> = match project {
         Some(p) if !p.trim().is_empty() => Some(p.trim().to_string()),
-        _ => extract_project_from_text(&combined_text),
+        _ => None,
     };
 
     if resolved_project.is_none() {
