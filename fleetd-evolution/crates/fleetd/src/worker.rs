@@ -162,7 +162,7 @@ async fn process_job(config: &Config, db: &Database, job: &crate::db::Job) {
     }
 
     let comment_body = parts.join("\n");
-    let _ = db.enqueue_outbox(job.id, &job.issue_id, &job.identifier, &comment_body, &marker);
+    let _ = db.enqueue_outbox(job.id, &job.issue_id, &job.identifier, &comment_body, &marker, &job.builder);
 }
 
 pub async fn process_outbox_item(
@@ -181,8 +181,20 @@ pub async fn process_outbox_item(
         }
     }
 
+    // Resolve builder safely from outbox metadata or report header/marker
+    let builder = crate::handoff_gate::resolve_builder(&item.builder, &item.marker, &item.comment_body);
+
+    // Resolve expected branch from Linear
+    let expected_branch = match linear.get_issue_branch_name(&item.issue_id).await {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("Failed to query issue branchName for {}: {}", item.identifier, e);
+            None
+        }
+    };
+
     // 2. Preflight Gate Check (MIN-236)
-    match crate::handoff_gate::validate_handoff_gate(&item.comment_body, None, "agy", verify_remote).await {
+    match crate::handoff_gate::validate_handoff_gate(&item.comment_body, expected_branch.as_deref(), &builder, verify_remote).await {
         Ok(coords) => {
             info!(
                 "Issue {} passed Handoff Gate (repo={}, branch={}, commit={}), advancing to In Review + QA label",
@@ -195,10 +207,10 @@ pub async fn process_outbox_item(
         }
         Err(err) => {
             warn!(
-                "Issue {} failed Handoff Gate ({:?}), transition to In Review BLOCKED. Issuing auto-REWORK",
-                item.identifier, err
+                "Issue {} failed Handoff Gate ({:?}), transition to In Review BLOCKED. Issuing auto-REWORK to @{}",
+                item.identifier, err, builder
             );
-            let rework_body = err.to_rework_comment("agy");
+            let rework_body = err.to_rework_comment(&builder);
             let _ = linear.post_comment(&item.issue_id, &rework_body).await;
             let _ = db.mark_outbox_delivered(item.id);
             info!("Handoff Gate intercepted delivery for issue {}", item.identifier);

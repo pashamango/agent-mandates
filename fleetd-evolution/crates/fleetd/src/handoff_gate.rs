@@ -363,15 +363,11 @@ async fn run_git(args: &[&str], cwd: Option<&Path>, timeout_secs: u64) -> Result
 }
 
 pub async fn verify_remote_git(coords: &HandoffCoordinates) -> Result<(), GateError> {
-    // 1. Verification command check: must explicitly verify the commit or branch
+    // 1. Verification command check: must explicitly verify the exact commit SHA
     let verify_cmd = &coords.verify_cmd;
-    let commit_short = if coords.commit.len() >= 7 { &coords.commit[..7] } else { &coords.commit };
-    if !verify_cmd.contains(&coords.commit)
-        && !verify_cmd.contains(commit_short)
-        && !verify_cmd.contains(&coords.branch)
-    {
+    if !verify_cmd.contains(&coords.commit) {
         return Err(GateError::InvalidVerificationCommand(
-            "Команда проверки не фиксирует заявленный commit или branch".to_string(),
+            "Команда проверки не фиксирует точный заявленный commit (SHA). Команда обязана содержать полный SHA коммита.".to_string(),
         ));
     }
 
@@ -427,9 +423,24 @@ pub async fn verify_remote_git(coords: &HandoffCoordinates) -> Result<(), GateEr
         return Err(GateError::GitExecutionError(format!("git remote add failed: {}", rem_err)));
     }
 
-    // git fetch --depth 50 origin <branch>
-    let (fetch_code, _, fetch_err) = run_git(&["fetch", "--depth", "50", "origin", &coords.branch], Some(&temp_dir), 30).await
+    // git fetch --depth 50 origin +refs/heads/<branch>:refs/remotes/origin/handoff-branch
+    let branch_ref = if coords.branch.starts_with("refs/heads/") {
+        coords.branch.clone()
+    } else {
+        format!("refs/heads/{}", coords.branch)
+    };
+    let refspec = format!("+{}:refs/remotes/origin/handoff-branch", branch_ref);
+
+    let (mut fetch_code, _, mut fetch_err) = run_git(&["fetch", "--depth", "50", "origin", &refspec], Some(&temp_dir), 30).await
         .map_err(|e| GateError::GitExecutionError(e))?;
+    if fetch_code != 0 {
+        // Fallback without refs/heads/
+        let fb_refspec = format!("+{}:refs/remotes/origin/handoff-branch", coords.branch);
+        let (fb_code, _, fb_err) = run_git(&["fetch", "--depth", "50", "origin", &fb_refspec], Some(&temp_dir), 30).await
+            .map_err(|e| GateError::GitExecutionError(e))?;
+        fetch_code = fb_code;
+        fetch_err = fb_err;
+    }
     if fetch_code != 0 {
         cleanup(temp_dir).await;
         return Err(GateError::GitExecutionError(format!("git fetch failed: {}", fetch_err)));
@@ -452,8 +463,8 @@ pub async fn verify_remote_git(coords: &HandoffCoordinates) -> Result<(), GateEr
         }
     }
 
-    // Check if commit is ancestor of branch FETCH_HEAD
-    let (anc_code, _, _) = run_git(&["merge-base", "--is-ancestor", &coords.commit, "FETCH_HEAD"], Some(&temp_dir), 10).await
+    // Check if commit is ancestor of branch refs/remotes/origin/handoff-branch (NOT FETCH_HEAD)
+    let (anc_code, _, _) = run_git(&["merge-base", "--is-ancestor", &coords.commit, "refs/remotes/origin/handoff-branch"], Some(&temp_dir), 10).await
         .unwrap_or((-1, String::new(), String::new()));
     if anc_code != 0 {
         cleanup(temp_dir).await;
@@ -558,4 +569,30 @@ pub async fn validate_handoff_gate(
     }
 
     Ok(coords)
+}
+
+pub fn resolve_builder(item_builder: &str, marker: &str, comment_body: &str) -> String {
+    let b = item_builder.trim().to_lowercase();
+    if !b.is_empty() && b != "any" {
+        return b;
+    }
+    if let Some(start) = marker.find("<!--") {
+        let rest = &marker[start + 4..];
+        if let Some(dash_run) = rest.find("-run:") {
+            let candidate = rest[..dash_run].trim();
+            if !candidate.is_empty() {
+                return candidate.to_lowercase();
+            }
+        }
+    }
+    if let Some(idx) = comment_body.find("build report:") {
+        let before = &comment_body[..idx];
+        if let Some(hash) = before.rfind("###") {
+            let candidate = before[hash + 3..].trim();
+            if !candidate.is_empty() {
+                return candidate.to_lowercase();
+            }
+        }
+    }
+    "agy".to_string()
 }

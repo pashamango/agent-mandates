@@ -145,6 +145,25 @@ impl LinearClient {
             .unwrap_or(false))
     }
 
+    pub async fn get_issue_branch_name(&self, issue_id: &str) -> Result<Option<String>, String> {
+        let q = r#"
+            query GetIssueBranch($issueId: String!) {
+              issue(id: $issueId) {
+                branchName
+              }
+            }
+        "#;
+
+        let data = self.graphql(q, json!({ "issueId": issue_id })).await?;
+        let branch = data
+            .pointer("/issue/branchName")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        Ok(branch)
+    }
+
     pub async fn set_in_review_and_qa_label(&self, issue_id: &str) -> Result<(), String> {
         // 1. Resolve State
         let state_query = r#"

@@ -142,10 +142,9 @@ def verify_remote_coordinates(
     Verifies that the given coordinates actually exist and are verifiable against remote origin.
     Returns None if verification succeeds, or an error description string if it fails.
     """
-    # 1. Verification command check: must fix and verify the commit or branch
-    short_commit = commit[:7] if len(commit) >= 7 else commit
-    if commit not in verification_cmd and short_commit not in verification_cmd and branch not in verification_cmd:
-        return "Команда проверки не фиксирует заявленный commit или branch"
+    # 1. Verification command check: must explicitly fix and verify the exact commit SHA
+    if commit not in verification_cmd:
+        return "Команда проверки не фиксирует точный заявленный commit (SHA). Укажите полный SHA в команде проверки."
 
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
@@ -194,8 +193,11 @@ def verify_remote_coordinates(
             subprocess.run(["git", "init"], cwd=tmp_dir, check=True, capture_output=True, env=env)
             subprocess.run(["git", "remote", "add", "origin", repo], cwd=tmp_dir, check=True, capture_output=True, env=env)
 
+            # Fetch target branch into dedicated ref refs/remotes/origin/handoff-branch
+            branch_ref = branch if branch.startswith("refs/heads/") else f"refs/heads/{branch}"
+            refspec = f"+{branch_ref}:refs/remotes/origin/handoff-branch"
             f_res = subprocess.run(
-                ["git", "fetch", "--depth", "50", "origin", branch],
+                ["git", "fetch", "--depth", "50", "origin", refspec],
                 cwd=tmp_dir,
                 capture_output=True,
                 text=True,
@@ -203,7 +205,18 @@ def verify_remote_coordinates(
                 env=env,
             )
             if f_res.returncode != 0:
-                return f"Не удалось выполнить fetch ветки '{branch}' из '{repo}': {f_res.stderr.strip()}"
+                # Fallback refspec without refs/heads/
+                fb_refspec = f"+{branch}:refs/remotes/origin/handoff-branch"
+                f_res = subprocess.run(
+                    ["git", "fetch", "--depth", "50", "origin", fb_refspec],
+                    cwd=tmp_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_secs * 2,
+                    env=env,
+                )
+                if f_res.returncode != 0:
+                    return f"Не удалось выполнить fetch ветки '{branch}' из '{repo}': {f_res.stderr.strip()}"
 
             # Check commit existence
             rev_res = subprocess.run(
@@ -226,9 +239,9 @@ def verify_remote_coordinates(
                 if df_res.returncode != 0:
                     return f"Коммит '{commit}' не найден в ветке '{branch}' на remote"
 
-            # Check commit is ancestor of branch
+            # Check commit is ancestor of the dedicated branch tip (NOT FETCH_HEAD)
             anc_res = subprocess.run(
-                ["git", "merge-base", "--is-ancestor", commit, "FETCH_HEAD"],
+                ["git", "merge-base", "--is-ancestor", commit, "refs/remotes/origin/handoff-branch"],
                 cwd=tmp_dir,
                 capture_output=True,
                 text=True,

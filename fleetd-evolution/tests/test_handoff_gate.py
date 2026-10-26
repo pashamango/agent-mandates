@@ -293,6 +293,40 @@ class TestHandoffGate(unittest.TestCase):
         self.assertFalse(verdict.passed)
         self.assertEqual(verdict.reason, "REMOTE_COORDINATES_VERIFICATION_FAILED")
 
+    def test_commit_from_other_branch_fails_remote_check(self):
+        """Regression test for Defect 1: commit from another branch (min-146) must fail ancestry check."""
+        # a670b9036dcc8d88cc362cddd22284a4b8d4d6f9 is tip of minutta/min-146, not minutta/min-236
+        other_commit = "a670b9036dcc8d88cc362cddd22284a4b8d4d6f9"
+        report = VALID_REPORT.replace(
+            "5c98f6f59bfe13123e09b3664f3b07ce51445730",
+            other_commit,
+        )
+        verdict = validate_handoff_gate(report, verify_remote=True)
+        self.assertFalse(verdict.passed)
+        self.assertEqual(verdict.reason, "REMOTE_COORDINATES_VERIFICATION_FAILED")
+        self.assertIn("не принадлежит истории ветки", verdict.auto_rework_comment)
+
+    def test_verification_command_without_commit_fails_gate(self):
+        """Regression test for Defect 2: verification command must fix full commit SHA; branch only is rejected."""
+        no_commit_cmd = "git clone --branch minutta/min-236-handoff-gate-sdacha-bez-koordinat-ne-prinimaetsya-lokalno https://github.com/pashamango/agent-mandates.git verify-box"
+        report = VALID_REPORT.replace(
+            "git clone https://github.com/pashamango/agent-mandates.git verify-box && cd verify-box && git checkout 5c98f6f59bfe13123e09b3664f3b07ce51445730",
+            no_commit_cmd,
+        )
+        verdict = validate_handoff_gate(report, verify_remote=True)
+        self.assertFalse(verdict.passed)
+        self.assertEqual(verdict.reason, "REMOTE_COORDINATES_VERIFICATION_FAILED")
+        self.assertIn("Команда проверки не фиксирует точный заявленный commit", verdict.auto_rework_comment)
+
+    def test_codex_builder_addressed_in_auto_rework(self):
+        """Regression test for Defect 4: Codex delivery auto-rework must address @codex, not hardcoded @agy."""
+        incomplete_report = VALID_REPORT.replace(
+            "- **Commit:** `5c98f6f59bfe13123e09b3664f3b07ce51445730`", ""
+        )
+        verdict = validate_handoff_gate(incomplete_report, builder="codex", verify_remote=False)
+        self.assertIn("@codex REWORK:", verdict.auto_rework_comment)
+        self.assertNotIn("@agy REWORK:", verdict.auto_rework_comment)
+
 
 if __name__ == "__main__":
     unittest.main()

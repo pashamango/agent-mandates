@@ -31,6 +31,7 @@ pub struct OutboxItem {
     pub identifier: String,
     pub comment_body: String,
     pub marker: String,
+    pub builder: String,
 }
 
 #[derive(Clone)]
@@ -102,6 +103,7 @@ impl Database {
         // Safe migration: check if builder column exists in jobs
         let _ = conn.execute("ALTER TABLE jobs ADD COLUMN builder TEXT DEFAULT 'any'", []);
         let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_jobs_builder ON jobs(builder)", []);
+        let _ = conn.execute("ALTER TABLE outbox ADD COLUMN builder TEXT DEFAULT 'agy'", []);
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -301,12 +303,13 @@ impl Database {
         identifier: &str,
         comment_body: &str,
         marker: &str,
+        builder: &str,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT OR IGNORE INTO outbox (job_id, issue_id, identifier, comment_body, marker, status, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7)",
-            params![job_id, issue_id, identifier, comment_body, marker, now(), now()],
+            "INSERT OR IGNORE INTO outbox (job_id, issue_id, identifier, comment_body, marker, builder, status, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8)",
+            params![job_id, issue_id, identifier, comment_body, marker, builder, now(), now()],
         )?;
         Ok(())
     }
@@ -314,7 +317,7 @@ impl Database {
     pub fn fetch_pending_outbox(&self) -> Result<Vec<OutboxItem>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, issue_id, identifier, comment_body, marker
+            "SELECT id, issue_id, identifier, comment_body, marker, COALESCE(builder, 'agy')
              FROM outbox WHERE status = 'pending' ORDER BY id ASC LIMIT 10",
         )?;
 
@@ -325,6 +328,7 @@ impl Database {
                 identifier: row.get(2)?,
                 comment_body: row.get(3)?,
                 marker: row.get(4)?,
+                builder: row.get(5)?,
             })
         })?;
 
