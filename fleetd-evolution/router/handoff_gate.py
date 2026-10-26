@@ -8,10 +8,15 @@ Enforces the 4 mandatory rules for transitioning builder deliveries into In Revi
    they must be classified as BLOCKER detailing missing repo/access.
 4. QA rule "Нет координат — нет поиска": verdict is strictly 'evidence unavailable, верните координаты'
    (class evidence-unavailable). Searching in unmentioned repositories is prohibited.
+5. Verifiability check against remote: repository accessibility, branch existence, commit existence
+   and ancestry on branch, artifact paths presence in commit tree, and verification command integrity.
 """
 
 import json
+import os
 import re
+import subprocess
+import tempfile
 from typing import Dict, Any, List, Optional
 
 
@@ -55,6 +60,8 @@ LOCAL_ONLY_INDICATORS = [
     re.compile(r"локальная\s+память", re.IGNORECASE),
     re.compile(r"без\s+пуша", re.IGNORECASE),
     re.compile(r"unpushed", re.IGNORECASE),
+    re.compile(r"только\s+на\s+диске", re.IGNORECASE),
+    re.compile(r"локальный\s+каталог", re.IGNORECASE),
 ]
 
 
@@ -108,28 +115,158 @@ def extract_artifact_paths(report_text: str) -> List[str]:
             in_artifacts_section = True
             continue
         if in_artifacts_section:
-            if stripped.startswith("- ") or stripped.startswith("* "):
+            if stripped.startswith("- **") or stripped.startswith("* **"):
+                in_artifacts_section = False
+            elif stripped.startswith("- ") or stripped.startswith("* "):
                 val = stripped[2:].strip().strip("`'\"")
-                # ignore headings or key-values like "- **Repository:**"
-                if not val.startswith("**") and val:
+                if not val.startswith("**") and val and "verification command" not in val.lower():
                     # Clean markdown links [name](path)
                     link_match = re.search(r"\[.*?\]\((.*?)\)", val)
                     if link_match:
                         val = link_match.group(1)
                     paths.append(val)
-            elif stripped.startswith("#### ") or stripped.startswith("### ") or stripped.startswith("---") or stripped.startswith("- **Independent"):
+            elif stripped.startswith("#### ") or stripped.startswith("### ") or stripped.startswith("---"):
                 in_artifacts_section = False
     return paths
+
+
+def verify_remote_coordinates(
+    repo: str,
+    branch: str,
+    commit: str,
+    artifact_paths: List[str],
+    verification_cmd: str,
+    timeout_secs: int = 15,
+) -> Optional[str]:
+    """
+    Verifies that the given coordinates actually exist and are verifiable against remote origin.
+    Returns None if verification succeeds, or an error description string if it fails.
+    """
+    # 1. Verification command check: must fix and verify the commit or branch
+    short_commit = commit[:7] if len(commit) >= 7 else commit
+    if commit not in verification_cmd and short_commit not in verification_cmd and branch not in verification_cmd:
+        return "Команда проверки не фиксирует заявленный commit или branch"
+
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+
+    # 2. Check remote repository accessibility
+    try:
+        res = subprocess.run(
+            ["git", "ls-remote", "--exit-code", repo],
+            capture_output=True,
+            text=True,
+            timeout=timeout_secs,
+            env=env,
+        )
+        if res.returncode != 0:
+            return f"Удалённый репозиторий недоступен или не существует: {repo}"
+    except Exception as e:
+        return f"Удалённый репозиторий недоступен ({e}): {repo}"
+
+    # 3. Check remote branch existence
+    branch_ref = f"refs/heads/{branch}"
+    try:
+        b_res = subprocess.run(
+            ["git", "ls-remote", "--exit-code", repo, branch_ref],
+            capture_output=True,
+            text=True,
+            timeout=timeout_secs,
+            env=env,
+        )
+        if b_res.returncode != 0 or not b_res.stdout.strip():
+            # Try without refs/heads/
+            fb_res = subprocess.run(
+                ["git", "ls-remote", "--exit-code", repo, branch],
+                capture_output=True,
+                text=True,
+                timeout=timeout_secs,
+                env=env,
+            )
+            if fb_res.returncode != 0 or not fb_res.stdout.strip():
+                return f"Ветка '{branch}' не найдена в удалённом репозитории '{repo}'"
+    except Exception as e:
+        return f"Ошибка проверки ветки '{branch}' на remote ({e})"
+
+    # 4. Clean clone/fetch into temp directory to verify commit and artifact paths
+    with tempfile.TemporaryDirectory(prefix="fleetd_gate_verify_") as tmp_dir:
+        try:
+            subprocess.run(["git", "init"], cwd=tmp_dir, check=True, capture_output=True, env=env)
+            subprocess.run(["git", "remote", "add", "origin", repo], cwd=tmp_dir, check=True, capture_output=True, env=env)
+
+            f_res = subprocess.run(
+                ["git", "fetch", "--depth", "50", "origin", branch],
+                cwd=tmp_dir,
+                capture_output=True,
+                text=True,
+                timeout=timeout_secs * 2,
+                env=env,
+            )
+            if f_res.returncode != 0:
+                return f"Не удалось выполнить fetch ветки '{branch}' из '{repo}': {f_res.stderr.strip()}"
+
+            # Check commit existence
+            rev_res = subprocess.run(
+                ["git", "rev-parse", "--verify", f"{commit}^{{commit}}"],
+                cwd=tmp_dir,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            if rev_res.returncode != 0:
+                # Try fetching commit directly if supported
+                df_res = subprocess.run(
+                    ["git", "fetch", "--depth", "1", "origin", commit],
+                    cwd=tmp_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_secs,
+                    env=env,
+                )
+                if df_res.returncode != 0:
+                    return f"Коммит '{commit}' не найден в ветке '{branch}' на remote"
+
+            # Check commit is ancestor of branch
+            anc_res = subprocess.run(
+                ["git", "merge-base", "--is-ancestor", commit, "FETCH_HEAD"],
+                cwd=tmp_dir,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            if anc_res.returncode != 0:
+                return f"Коммит '{commit}' не принадлежит истории ветки '{branch}'"
+
+            # Verify each artifact path exists in commit tree
+            for path in artifact_paths:
+                cat_res = subprocess.run(
+                    ["git", "cat-file", "-e", f"{commit}:{path}"],
+                    cwd=tmp_dir,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                )
+                if cat_res.returncode != 0:
+                    return f"Артефакт '{path}' не найден в коммите '{commit}'"
+
+        except subprocess.TimeoutExpired:
+            return "Таймаут проверки координат через git"
+        except Exception as e:
+            return f"Ошибка Git при верификации координат: {e}"
+
+    return None
 
 
 def validate_handoff_gate(
     report_text: str,
     expected_branch: Optional[str] = None,
     builder: str = "agy",
+    verify_remote: bool = True,
 ) -> HandoffVerdict:
     """
     Validates a builder completion report before allowing transition to In Review.
-    Enforces Rule 1 (4 coordinates), Rule 2 (template), Rule 3 (local=BLOCKER), Rule 4 (QA no-search).
+    Enforces Rule 1 (4 coordinates), Rule 2 (template), Rule 3 (local=BLOCKER), Rule 4 (QA no-search),
+    and verifies that remote coordinates are accessible and verifiable.
     """
     if not report_text or not report_text.strip():
         return HandoffVerdict(
@@ -150,19 +287,19 @@ def validate_handoff_gate(
     # 2. Extract coordinates from Phi envelope or markdown text
     phi_git = extract_phi_envelope_git(report_text) or {}
 
-    repo = phi_git.get("repo_url")
+    repo = phi_git.get("repo_url") or phi_git.get("repo")
     if not repo:
         repo_match = REPO_REGEX.search(report_text)
         if repo_match:
             repo = repo_match.group(1).strip()
 
-    branch = phi_git.get("branch")
+    branch = phi_git.get("branch") or phi_git.get("git_branch")
     if not branch:
         branch_match = BRANCH_REGEX.search(report_text)
         if branch_match:
             branch = branch_match.group(1).strip()
 
-    commit = phi_git.get("commit_sha")
+    commit = phi_git.get("commit_sha") or phi_git.get("commit")
     if not commit:
         commit_match = COMMIT_REGEX.search(report_text)
         if commit_match:
@@ -246,6 +383,20 @@ def validate_handoff_gate(
                 f"Укажите команду в блоке Evidence по шаблону HANDOFF-GATE-PROTOCOL.md."
             ),
         )
+
+    # 7. Remote coordinates verifiability check
+    if verify_remote:
+        err = verify_remote_coordinates(repo, branch, commit, artifact_paths, verification_cmd)
+        if err:
+            return HandoffVerdict(
+                passed=False,
+                reason="REMOTE_COORDINATES_VERIFICATION_FAILED",
+                missing_coordinates=[err],
+                auto_rework_comment=(
+                    f"@{builder} REWORK: evidence unavailable. {err}.\n"
+                    f"Тикет НЕ переходит в In Review. В соответствии с MIN-236 координаты сдачи должны быть доступны на remote origin."
+                ),
+            )
 
     # All checks passed
     extracted = {

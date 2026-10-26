@@ -867,3 +867,107 @@ async fn test_rust_acceptance_10_daemon_integration_webhook_and_vacuum() {
     assert_eq!(q_router.slot_quota_status.lock().unwrap().get("agy").unwrap(), "QUOTA_SOURCE_UNAVAILABLE");
     assert_eq!(q_router.slot_quota_status.lock().unwrap().get("codex-local").unwrap(), "QUOTA_SOURCE_UNAVAILABLE");
 }
+
+#[tokio::test]
+async fn test_rust_acceptance_11_handoff_gate_enforcement() {
+    use fleetd::handoff_gate::{validate_handoff_gate, GateError};
+
+    // 11a: PRD-35 missing coordinates & local claim fails gate
+    let prd_35_trace = "### agy build report: `PRD-35`\nStatus: ✅ COMPLETED\nФайл сохранен в корне workspace-репозитория как spec.md.";
+    let res_prd35 = validate_handoff_gate(prd_35_trace, None, "agy", true).await;
+    assert!(res_prd35.is_err());
+    let err_prd35 = res_prd35.unwrap_err();
+    assert!(err_prd35.is_blocker());
+
+    // 11b: MIN-194 local only claim exhibits blocker semantics
+    let min_194_trace = "### codex build report: `MIN-194`\nStatus: ✅ COMPLETED\nИзменения внесены только локально.";
+    let res_min194 = validate_handoff_gate(min_194_trace, None, "codex", true).await;
+    assert!(res_min194.is_err());
+    let err_min194 = res_min194.unwrap_err();
+    assert_eq!(err_min194, GateError::LocalOnlyBlocker);
+    assert!(err_min194.to_rework_comment("codex").contains("<!-- handoff-gate:blocker -->"));
+
+    // 11c: Fake remote is rejected on remote preflight check
+    let fake_remote_trace = r#"
+### agy build report: `MIN-991`
+Status: ✅ COMPLETED
+#### Evidence / Coordinates
+- **Repository:** `https://example.invalid/nonexistent.git`
+- **Branch:** `does-not-exist`
+- **Commit:** `deadbee`
+- **Artifact Paths:**
+  - `nonexistent.md`
+- **Independent Verification Command:**
+  ```bash
+  git clone https://example.invalid/nonexistent.git && cd nonexistent && git checkout deadbee
+  ```
+"#;
+    let res_fake_remote = validate_handoff_gate(fake_remote_trace, None, "agy", true).await;
+    assert!(res_fake_remote.is_err());
+    match res_fake_remote.unwrap_err() {
+        GateError::RemoteUnreachable(repo) => assert!(repo.contains("example.invalid")),
+        other => panic!("Expected RemoteUnreachable, got {:?}", other),
+    }
+
+    // 11d: Missing commit on branch is rejected
+    let fake_commit_trace = r#"
+### agy build report: `MIN-992`
+Status: ✅ COMPLETED
+#### Evidence / Coordinates
+- **Repository:** `https://github.com/pashamango/agent-mandates.git`
+- **Branch:** `minutta/min-236-handoff-gate-sdacha-bez-koordinat-ne-prinimaetsya-lokalno`
+- **Commit:** `0000000000000000000000000000000000000000`
+- **Artifact Paths:**
+  - `HANDOFF-GATE-PROTOCOL.md`
+- **Independent Verification Command:**
+  ```bash
+  git clone https://github.com/pashamango/agent-mandates.git && cd agent-mandates && git checkout 0000000000000000000000000000000000000000
+  ```
+"#;
+    let res_fake_commit = validate_handoff_gate(fake_commit_trace, None, "agy", true).await;
+    assert!(res_fake_commit.is_err());
+    match res_fake_commit.unwrap_err() {
+        GateError::CommitNotFoundOnBranch(_) => {},
+        other => panic!("Expected CommitNotFoundOnBranch, got {:?}", other),
+    }
+
+    // 11e: Missing artifact path is rejected
+    let fake_path_trace = r#"
+### agy build report: `MIN-993`
+Status: ✅ COMPLETED
+#### Evidence / Coordinates
+- **Repository:** `https://github.com/pashamango/agent-mandates.git`
+- **Branch:** `minutta/min-236-handoff-gate-sdacha-bez-koordinat-ne-prinimaetsya-lokalno`
+- **Commit:** `5c98f6f59bfe13123e09b3664f3b07ce51445730`
+- **Artifact Paths:**
+  - `does_not_exist_xyz.md`
+- **Independent Verification Command:**
+  ```bash
+  git clone https://github.com/pashamango/agent-mandates.git && cd agent-mandates && git checkout 5c98f6f59bfe13123e09b3664f3b07ce51445730
+  ```
+"#;
+    let res_fake_path = validate_handoff_gate(fake_path_trace, None, "agy", true).await;
+    assert!(res_fake_path.is_err());
+    match res_fake_path.unwrap_err() {
+        GateError::ArtifactPathNotFound(p) => assert!(p.contains("does_not_exist_xyz.md")),
+        other => panic!("Expected ArtifactPathNotFound, got {:?}", other),
+    }
+
+    // 11f: Valid verifiable coordinates pass Handoff Gate
+    let valid_trace = r#"
+### agy build report: `MIN-236`
+Status: ✅ COMPLETED
+#### Evidence / Coordinates
+- **Repository:** `https://github.com/pashamango/agent-mandates.git`
+- **Branch:** `minutta/min-236-handoff-gate-sdacha-bez-koordinat-ne-prinimaetsya-lokalno`
+- **Commit:** `5c98f6f59bfe13123e09b3664f3b07ce51445730`
+- **Artifact Paths:**
+  - `HANDOFF-GATE-PROTOCOL.md`
+- **Independent Verification Command:**
+  ```bash
+  git clone https://github.com/pashamango/agent-mandates.git && cd agent-mandates && git checkout 5c98f6f59bfe13123e09b3664f3b07ce51445730
+  ```
+"#;
+    let res_valid = validate_handoff_gate(valid_trace, None, "agy", true).await;
+    assert!(res_valid.is_ok(), "Valid coordinates must pass: {:?}", res_valid);
+}

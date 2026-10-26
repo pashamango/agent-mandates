@@ -1,6 +1,7 @@
 pub mod canonical;
 pub mod config;
 pub mod db;
+pub mod handoff_gate;
 pub mod lease;
 pub mod ledger;
 pub mod linear;

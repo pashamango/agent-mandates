@@ -200,10 +200,24 @@
 
 ## 5. Архитектурный гейт в fleetd (Часть Б)
 
-В модуле `worker.rs` и `linear.rs` диспетчера `fleetd`:
-1. Перед вызовом `linear.set_in_review_and_qa_label(&item.issue_id)` выполняется префлайт-валидация отчёта функцией `validate_handoff_gate(&item.comment_body)`.
-2. Если валидация возвращает ошибку координат:
-   - Вызов смены статуса на `In Review` **блокируется**.
-   - В outbox помещается комментарий авто-REWORK:
-     `🤖 **Handoff Gate Intercept** — Сдача без координат отклонена. Статус возвращён в In Progress.`
-3. Полная программная реализация валидатора оформлена в `fleetd-evolution/router/handoff_gate.py` с тестовым покрытием в `fleetd-evolution/tests/test_handoff_gate.py`.
+В Rust-диспетчере `fleetd` (`crates/fleetd`) и модуле `worker.rs`:
+1. **Нативная интеграция в outbox-конвейер:**  
+   В функции `process_outbox_item` (`crates/fleetd/src/worker.rs`) перед вызовом `linear.set_in_review_and_qa_label(&item.issue_id)` выполняется префлайт-валидация отчёта функцией `fleetd::handoff_gate::validate_handoff_gate(&item.comment_body, None, "agy", true)`.
+2. **Блокировка смены статуса и авто-REWORK:**  
+   Если валидация возвращает ошибку координат (`GateError`):
+   - Вызов смены статуса на `In Review` и добавление метки `Role: QA-Needed` **категорически блокируются** (0 вызовов к Linear API).
+   - В тикет публикуется комментарий авто-REWORK (`<!-- handoff-gate:auto-rework -->`):
+     `🤖 **Handoff Gate Intercept** — Сдача отклонена на гейте. В соответствии с MIN-236 тикет НЕ переходит в In Review. QA-лейн не вызывается.`
+   - При обнаружении признаков локальной сдачи без пуша выставляется семантика **`BLOCKER`** (`<!-- handoff-gate:blocker -->` / «Локально — значит BLOCKER»).
+3. **Верификация координат относительно remote origin (`verify_remote_git`):**  
+   Гейт не ограничивается проверкой строк, а проверяет реальную доступность координат:
+   - Проверяется доступность удалённого репозитория (`git ls-remote --exit-code <repo>`).
+   - Проверяется существование ветки на remote (`git ls-remote --exit-code <repo> refs/heads/<branch>`).
+   - Выполняется чистый изолированный fetch коммита во временную директорию (`/tmp/fleetd_gate_verify_<uuid>`).
+   - Проверяется принадлежность коммита истории ветки (`git merge-base --is-ancestor <commit> FETCH_HEAD`).
+   - Проверяется наличие каждого заявленного артефакта в дереве коммита (`git cat-file -e <commit>:<path>`).
+   - Проверяется, что команда независимой проверки фиксирует заявленный commit.
+4. **Тестовое покрытие и доказательства:**  
+   - Rust Unit & Acceptance: `crates/fleetd/tests/acceptance.rs` (`test_rust_acceptance_11_handoff_gate_enforcement`) — 11 passed.
+   - Rust Outbox Integration: `crates/fleetd/tests/handoff_gate_integration.rs` — 6 passed (доказано отсутствие вызова перехода в In Review для PRD-35, MIN-194, фиктивного remote, отсутствующего commit и отсутствующего artifact path).
+   - Python Reference Suite: `fleetd-evolution/tests/test_handoff_gate.py` — 15 passed.

@@ -165,10 +165,50 @@ async fn process_job(config: &Config, db: &Database, job: &crate::db::Job) {
     let _ = db.enqueue_outbox(job.id, &job.issue_id, &job.identifier, &comment_body, &marker);
 }
 
-pub async fn run_outbox_loop(config: Config, db: Database) {
-    info!("Outbox delivery loop started");
-    let linear = LinearClient::new(&config.linear_api_url, &config.linear_api_key);
+pub async fn process_outbox_item(
+    db: &Database,
+    linear: &LinearClient,
+    item: &crate::db::OutboxItem,
+    verify_remote: bool,
+) -> Result<bool, String> {
+    // 1. Reconciliation: check if already posted
+    let already_posted = linear.comment_exists(&item.issue_id, &item.marker).await;
+    if !already_posted {
+        if let Err(e) = linear.post_comment(&item.issue_id, &item.comment_body).await {
+            warn!("Failed to post comment for {}: {}", item.identifier, e);
+            let _ = db.mark_outbox_failed(item.id, &e);
+            return Err(e);
+        }
+    }
 
+    // 2. Preflight Gate Check (MIN-236)
+    match crate::handoff_gate::validate_handoff_gate(&item.comment_body, None, "agy", verify_remote).await {
+        Ok(coords) => {
+            info!(
+                "Issue {} passed Handoff Gate (repo={}, branch={}, commit={}), advancing to In Review + QA label",
+                item.identifier, coords.repo, coords.branch, coords.commit
+            );
+            let _ = linear.set_in_review_and_qa_label(&item.issue_id).await;
+            let _ = db.mark_outbox_delivered(item.id);
+            info!("Delivered outbox comment for issue {}", item.identifier);
+            Ok(true)
+        }
+        Err(err) => {
+            warn!(
+                "Issue {} failed Handoff Gate ({:?}), transition to In Review BLOCKED. Issuing auto-REWORK",
+                item.identifier, err
+            );
+            let rework_body = err.to_rework_comment("agy");
+            let _ = linear.post_comment(&item.issue_id, &rework_body).await;
+            let _ = db.mark_outbox_delivered(item.id);
+            info!("Handoff Gate intercepted delivery for issue {}", item.identifier);
+            Ok(false)
+        }
+    }
+}
+
+pub async fn run_outbox_loop_with_client(_config: Config, db: Database, linear: LinearClient) {
+    info!("Outbox delivery loop started");
     loop {
         let items = match db.fetch_pending_outbox() {
             Ok(i) => i,
@@ -185,22 +225,12 @@ pub async fn run_outbox_loop(config: Config, db: Database) {
         }
 
         for item in items {
-            // 1. Reconciliation: check if already posted
-            let already_posted = linear.comment_exists(&item.issue_id, &item.marker).await;
-            if !already_posted {
-                if let Err(e) = linear.post_comment(&item.issue_id, &item.comment_body).await {
-                    warn!("Failed to post comment for {}: {}", item.identifier, e);
-                    let _ = db.mark_outbox_failed(item.id, &e);
-                    tokio::time::sleep(Duration::from_secs(3)).await;
-                    continue;
-                }
-            }
-
-            // 2. Advance workflow state to In Review + QA label
-            let _ = linear.set_in_review_and_qa_label(&item.issue_id).await;
-
-            let _ = db.mark_outbox_delivered(item.id);
-            info!("Delivered outbox comment for issue {}", item.identifier);
+            let _ = process_outbox_item(&db, &linear, &item, true).await;
         }
     }
+}
+
+pub async fn run_outbox_loop(config: Config, db: Database) {
+    let linear = LinearClient::new(&config.linear_api_url, &config.linear_api_key);
+    run_outbox_loop_with_client(config, db, linear).await;
 }

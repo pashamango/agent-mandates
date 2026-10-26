@@ -1,12 +1,16 @@
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
 use serde_json::json;
+use std::sync::Arc;
 use std::time::Duration;
+
+pub type MockGraphqlHandler = Arc<dyn Fn(&str, serde_json::Value) -> Result<serde_json::Value, String> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct LinearClient {
     client: reqwest::Client,
     api_url: String,
     api_key: String,
+    mock_handler: Option<MockGraphqlHandler>,
 }
 
 impl LinearClient {
@@ -16,7 +20,6 @@ impl LinearClient {
             AUTHORIZATION,
             HeaderValue::from_str(api_key).unwrap_or_else(|_| HeaderValue::from_static("")),
         );
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(
             USER_AGENT,
             HeaderValue::from_static("mindrock-fleetd/0.1.0"),
@@ -24,6 +27,7 @@ impl LinearClient {
 
         let client = reqwest::Client::builder()
             .default_headers(headers)
+            .no_proxy()
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_default();
@@ -32,10 +36,27 @@ impl LinearClient {
             client,
             api_url: api_url.to_string(),
             api_key: api_key.to_string(),
+            mock_handler: None,
+        }
+    }
+
+    pub fn new_mock<F>(handler: F) -> Self
+    where
+        F: Fn(&str, serde_json::Value) -> Result<serde_json::Value, String> + Send + Sync + 'static,
+    {
+        Self {
+            client: reqwest::Client::new(),
+            api_url: "mock://linear".to_string(),
+            api_key: "mock_key".to_string(),
+            mock_handler: Some(Arc::new(handler)),
         }
     }
 
     async fn graphql(&self, query: &str, variables: serde_json::Value) -> Result<serde_json::Value, String> {
+        if let Some(mock) = &self.mock_handler {
+            return mock(query, variables);
+        }
+
         if self.api_key.is_empty() {
             return Err("Linear API key is empty".to_string());
         }
@@ -54,10 +75,15 @@ impl LinearClient {
             .map_err(|e| format!("HTTP request failed: {}", e))?;
 
         let status = resp.status();
-        let payload: serde_json::Value = resp
-            .json()
+        let text = resp
+            .text()
             .await
-            .map_err(|e| format!("Failed to parse JSON (HTTP {}): {}", status, e))?;
+            .map_err(|e| format!("Failed to read body: {}", e))?;
+        if !status.is_success() {
+            eprintln!("LinearClient HTTP error: status={}, text={}", status, text);
+        }
+        let payload: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| format!("Failed to parse JSON (HTTP {}): {} (body: {})", status, e, text))?;
 
         if let Some(errors) = payload.get("errors").and_then(|e| e.as_array()) {
             if !errors.is_empty() {

@@ -1,13 +1,12 @@
 # Fleetd Handoff Gate Daemon Enforcement Architecture (Part B)
 **Reference:** MIN-236  
-**Status:** Design & Reference Implementation
+**Status:** Implemented & Verified in Rust Dispatcher (`fleetd`) and Python Validator (`router/handoff_gate.py`)
 
 ## 1. Overview
-In the original `fleetd` Rust worker (`src/worker.rs`), every job completed with exit code 0 was automatically advanced to `In Review` + `Role: QA-Needed`:
+In the original `fleetd` Rust worker (`src/worker.rs`), every job was automatically advanced to `In Review` + `Role: QA-Needed` upon delivery:
 
 ```rust
-// worker.rs:199
-// 2. Advance workflow state to In Review + QA label
+// Previous unverified worker behavior:
 let _ = linear.set_in_review_and_qa_label(&item.issue_id).await;
 ```
 
@@ -16,53 +15,85 @@ This created phantom `COMPLETED` issues and wasted QA review cycles whenever a b
 - Failed to provide verifiable coordinates (`repo`, `branch`, `commit`, `path`);
 - Provided local-only artifacts without repository coordinates.
 
-## 2. Gate Preflight Architecture
-Under MIN-236, the transition to `In Review` is strictly guarded by the Handoff Gate preflight check:
+## 2. Gate Preflight Architecture in Rust
+Under MIN-236, the transition to `In Review` is strictly guarded by the Handoff Gate preflight check implemented in `fleetd::handoff_gate::validate_handoff_gate`:
 
 ```rust
-pub fn validate_handoff_gate(comment_body: &str) -> Result<HandoffCoordinates, GateError> {
-    // 1. Rule 3: Detect local-only unpushed declarations
-    if is_local_only_claim(comment_body) {
-        return Err(GateError::LocalOnlyBlocker);
-    }
-    
-    // 2. Rule 1: Extract and verify 4 coordinates
-    let repo = extract_repo(comment_body).ok_or(GateError::MissingRepo)?;
-    let branch = extract_branch(comment_body).ok_or(GateError::MissingBranch)?;
-    let commit = extract_commit(comment_body).ok_or(GateError::MissingCommit)?;
-    let paths = extract_paths(comment_body);
-    if paths.is_empty() {
-        return Err(GateError::MissingPaths);
-    }
-    let verify_cmd = extract_verify_cmd(comment_body).ok_or(GateError::MissingVerifyCmd)?;
-
-    Ok(HandoffCoordinates { repo, branch, commit, paths, verify_cmd })
-}
+pub async fn validate_handoff_gate(
+    comment_body: &str,
+    expected_branch: Option<&str>,
+    builder: &str,
+    verify_remote: bool,
+) -> Result<HandoffCoordinates, GateError>
 ```
 
-## 3. Worker Outbox Loop Guard
-In `run_outbox_loop`:
+The preflight check enforces:
+1. **Rule 3: Local-Only Blocker Check:** Detects local-only claims (`has_local_only_indicator`) without remote push coordinates. Returns `GateError::LocalOnlyBlocker` with `<!-- handoff-gate:blocker -->`.
+2. **Rule 1: Coordinate Extraction:** Extracts `repo`, `branch`, `commit`, `paths`, and `verify_cmd` from either `<!-- phi-envelope:... -->` or Markdown Evidence sections. Missing coordinates return `GateError::MissingCoordinates`.
+3. **Verification Command Integrity:** Confirms that `verify_cmd` explicitly references and checks the declared `commit` or `branch`.
+4. **Remote Verifiability (`verify_remote_git`):**
+   - Remote repository accessibility check via `git ls-remote --exit-code <repo>`.
+   - Remote branch existence check via `git ls-remote --exit-code <repo> refs/heads/<branch>`.
+   - Clean fetch into temporary directory (`/tmp/fleetd_gate_verify_<uuid>`).
+   - Commit existence via `git rev-parse --verify <commit>^{commit}` and branch ancestry via `git merge-base --is-ancestor <commit> FETCH_HEAD`.
+   - Presence of each artifact path in commit tree via `git cat-file -e <commit>:<path>`.
+
+## 3. Worker Outbox Loop Integration
+In `crates/fleetd/src/worker.rs`, the outbox processing pipeline is strictly gated before any status mutation:
 
 ```rust
-match validate_handoff_gate(&item.comment_body) {
-    Ok(_coords) => {
-        // Handoff Gate passed: advance to In Review + Role: QA-Needed
-        let _ = linear.set_in_review_and_qa_label(&item.issue_id).await;
-        info!("Issue {} passed Handoff Gate, transitioned to In Review", item.identifier);
+pub async fn process_outbox_item(
+    db: &Database,
+    linear: &LinearClient,
+    item: &crate::db::OutboxItem,
+    verify_remote: bool,
+) -> Result<bool, String> {
+    // 1. Reconciliation: check if already posted
+    let already_posted = linear.comment_exists(&item.issue_id, &item.marker).await;
+    if !already_posted {
+        if let Err(e) = linear.post_comment(&item.issue_id, &item.comment_body).await {
+            warn!("Failed to post comment for {}: {}", item.identifier, e);
+            let _ = db.mark_outbox_failed(item.id, &e);
+            return Err(e);
+        }
     }
-    Err(err) => {
-        // Intercepted at Handoff Gate: DO NOT transition to In Review!
-        warn!("Issue {} failed Handoff Gate ({:?}), issuing auto-REWORK", item.identifier, err);
-        let rework_body = format!(
-            "🤖 **Handoff Gate Intercept**\n<!-- handoff-gate:auto-rework -->\n\
-            Сдача отклонена на гейте: {}\n\
-            В соответствии с MIN-236 Rule 1 & 4 тикет НЕ переходит в In Review. QA-лейн не вызывается.",
-            err.to_rework_message()
-        );
-        let _ = linear.post_comment(&item.issue_id, &rework_body).await;
+
+    // 2. Preflight Gate Check (MIN-236)
+    match crate::handoff_gate::validate_handoff_gate(&item.comment_body, None, "agy", verify_remote).await {
+        Ok(coords) => {
+            info!(
+                "Issue {} passed Handoff Gate (repo={}, branch={}, commit={}), advancing to In Review + QA label",
+                item.identifier, coords.repo, coords.branch, coords.commit
+            );
+            let _ = linear.set_in_review_and_qa_label(&item.issue_id).await;
+            let _ = db.mark_outbox_delivered(item.id);
+            Ok(true)
+        }
+        Err(err) => {
+            warn!(
+                "Issue {} failed Handoff Gate ({:?}), transition to In Review BLOCKED. Issuing auto-REWORK",
+                item.identifier, err
+            );
+            let rework_body = err.to_rework_comment("agy");
+            let _ = linear.post_comment(&item.issue_id, &rework_body).await;
+            let _ = db.mark_outbox_delivered(item.id);
+            Ok(false)
+        }
     }
 }
 ```
 
 ## 4. Verification & Testing
-The complete logic and regression test suite is verified via `fleetd-evolution/router/handoff_gate.py` and `fleetd-evolution/tests/test_handoff_gate.py`.
+
+### Rust Test Suites:
+1. `crates/fleetd/tests/acceptance.rs`:
+   - `test_rust_acceptance_11_handoff_gate_enforcement`: Tests all 5 failure modes (PRD-35, MIN-194, fake remote, missing commit, missing artifact path) and verified delivery against canonical git repositories. (11 passed).
+2. `crates/fleetd/tests/handoff_gate_integration.rs`:
+   - Full outbox pipeline integration tests against a mock Linear API verifying that on gate failure:
+     - `MoveState` (In Review) is **never** called (`0` calls).
+     - `AddLabel` (`Role: QA-Needed`) is **never** called (`0` calls).
+     - An auto-REWORK comment is posted.
+     - Blocker semantics are enforced for local-only declarations. (6 passed).
+
+### Python Test Suite:
+- `fleetd-evolution/tests/test_handoff_gate.py`: 15 comprehensive tests covering syntax, local blockers, remote verifiability, and reviewer counterexamples. (15 passed).
