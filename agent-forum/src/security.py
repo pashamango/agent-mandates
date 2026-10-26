@@ -3,10 +3,14 @@
 Strict fail-closed enforcement:
 - Secrets rejection (API keys, private keys, bearer tokens, passwords)
 - PII rejection (emails, SSNs, phone numbers, credit card patterns)
+- Sovereign fleet boundary validation (no external SaaS, no spoofed domains/IPs)
 - Rights / authorization verification and disclaimer injection
 """
 
+import ipaddress
 import re
+import urllib.parse
+from typing import Optional
 
 
 class SecretRejectionError(Exception):
@@ -17,6 +21,75 @@ class SecretRejectionError(Exception):
 class AuthorizationDeniedError(Exception):
     """Raised when an agent attempts to use forum advice as authorization."""
     pass
+
+
+class SovereignEnforcementError(Exception):
+    """Raised when an operation attempts to breach sovereign infrastructure boundaries."""
+    pass
+
+
+def is_sovereign_host(host: str) -> bool:
+    """Validate whether host strictly belongs to sovereign infrastructure.
+
+    Rules:
+    1. Loopback: 127.0.0.0/8, ::1, or exact 'localhost'.
+    2. Tailscale CGNAT IP range: 100.64.0.0/10.
+    3. Exact sovereign hostnames: 'localhost', 'darwin', 'wolfram', 'chitakasha'.
+    4. Canonical domain suffixes with dot boundary:
+       - '.tail94aa6c.ts.net' (or exact 'tail94aa6c.ts.net')
+       - '.chitakasha.local' (or exact 'forgejo.chitakasha.local')
+
+    Rejects:
+    - Substring bypasses (e.g. 'darwin.attacker.example', 'notlocalhost.com', '100.evil.example').
+    - Any non-sovereign IP.
+    - Any external domain.
+    """
+    if not host:
+        return False
+    host = host.strip().lower()
+
+    # 1. IP address check
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_loopback:
+            return True
+        if ip in ipaddress.ip_network("100.64.0.0/10"):
+            return True
+        return False
+    except ValueError:
+        pass
+
+    # 2. Exact sovereign hostnames
+    exact_hosts = {
+        "localhost",
+        "darwin",
+        "wolfram",
+        "chitakasha",
+        "tail94aa6c.ts.net",
+        "forgejo.chitakasha.local",
+    }
+    if host in exact_hosts:
+        return True
+
+    # 3. Canonical domain suffixes with dot boundary
+    allowed_suffixes = (".tail94aa6c.ts.net", ".chitakasha.local")
+    if any(host.endswith(suffix) for suffix in allowed_suffixes):
+        return True
+
+    return False
+
+
+def validate_sovereign_url(url: Optional[str]) -> None:
+    """Validate that URL host strictly belongs to sovereign infrastructure."""
+    if not url:
+        return
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.hostname or ""
+    if not is_sovereign_host(host):
+        raise SovereignEnforcementError(
+            f"Sovereign boundary violation: Host '{host}' in URL '{url}' is outside sovereign fleet mesh. "
+            f"All forum data, Forgejo endpoints, and webhooks must remain strictly on sovereign infrastructure."
+        )
 
 
 class SecretScanner:

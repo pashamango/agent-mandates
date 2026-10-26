@@ -33,6 +33,7 @@ class Issue:
     body: str
     domains: List[str]
     author: str
+    remote_id: Optional[int] = None
     duplicate_count: int = 1
     askers: Set[str] = field(default_factory=set)
     status: str = "open"  # 'open', 'closed'
@@ -79,6 +80,7 @@ class ForumStorage:
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS issues (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    remote_id INTEGER,
                     title TEXT NOT NULL,
                     body TEXT NOT NULL,
                     domains_json TEXT NOT NULL,
@@ -93,6 +95,13 @@ class ForumStorage:
                     updated_at REAL NOT NULL
                 )
             """)
+            # Schema migration check for remote_id
+            cursor = self.conn.cursor()
+            cursor.execute("PRAGMA table_info(issues)")
+            cols = [r[1] for r in cursor.fetchall()]
+            if "remote_id" not in cols:
+                self.conn.execute("ALTER TABLE issues ADD COLUMN remote_id INTEGER")
+
             self.conn.execute("""
                 CREATE TABLE IF NOT EXISTS comments (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -128,7 +137,7 @@ class ForumStorage:
                 self.conn.execute(
                     """
                     UPDATE issues SET
-                        title = ?, body = ?, domains_json = ?, author = ?,
+                        remote_id = ?, title = ?, body = ?, domains_json = ?, author = ?,
                         duplicate_count = ?, askers_json = ?, status = ?,
                         requires_canonical_verification = ?,
                         canonization_triggered_duplicate = ?,
@@ -137,6 +146,7 @@ class ForumStorage:
                     WHERE id = ?
                     """,
                     (
+                        issue.remote_id,
                         issue.title,
                         issue.body,
                         json.dumps(issue.domains),
@@ -151,18 +161,48 @@ class ForumStorage:
                         issue.id,
                     ),
                 )
-            else:
-                cursor = self.conn.execute(
+            elif issue.remote_id is not None:
+                self.conn.execute(
                     """
                     INSERT INTO issues (
-                        title, body, domains_json, author, duplicate_count,
+                        id, remote_id, title, body, domains_json, author, duplicate_count,
                         askers_json, status, requires_canonical_verification,
                         canonization_triggered_duplicate,
                         canonization_triggered_contradiction,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
+                        issue.remote_id,
+                        issue.remote_id,
+                        issue.title,
+                        issue.body,
+                        json.dumps(issue.domains),
+                        issue.author,
+                        issue.duplicate_count,
+                        json.dumps(list(issue.askers)),
+                        issue.status,
+                        1 if issue.requires_canonical_verification else 0,
+                        1 if issue.canonization_triggered_duplicate else 0,
+                        1 if issue.canonization_triggered_contradiction else 0,
+                        issue.created_at,
+                        issue.updated_at,
+                    ),
+                )
+                issue.id = issue.remote_id
+            else:
+                cursor = self.conn.execute(
+                    """
+                    INSERT INTO issues (
+                        remote_id, title, body, domains_json, author, duplicate_count,
+                        askers_json, status, requires_canonical_verification,
+                        canonization_triggered_duplicate,
+                        canonization_triggered_contradiction,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        issue.remote_id,
                         issue.title,
                         issue.body,
                         json.dumps(issue.domains),
@@ -181,9 +221,9 @@ class ForumStorage:
         return issue
 
     def get_issue(self, issue_id: int) -> Optional[Issue]:
-        """Retrieve an issue and its comments by ID."""
+        """Retrieve an issue and its comments by local ID or remote ID."""
         cursor = self.conn.cursor()
-        cursor.execute("SELECT * FROM issues WHERE id = ?", (issue_id,))
+        cursor.execute("SELECT * FROM issues WHERE id = ? OR remote_id = ? ORDER BY id ASC", (issue_id, issue_id))
         row = cursor.fetchone()
         if not row:
             return None
@@ -304,8 +344,12 @@ class ForumStorage:
         """Convert an SQLite row into an Issue dataclass."""
         issue_id = row["id"]
         comments = self.get_comments_for_issue(issue_id)
+        remote_id = None
+        if "remote_id" in row.keys() and row["remote_id"] is not None:
+            remote_id = int(row["remote_id"])
         return Issue(
             id=issue_id,
+            remote_id=remote_id,
             title=row["title"],
             body=row["body"],
             domains=json.loads(row["domains_json"]),

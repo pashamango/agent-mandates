@@ -10,6 +10,7 @@ import time
 import urllib.error
 import urllib.request
 from typing import Callable, Dict, List, Optional
+from .security import SovereignEnforcementError, validate_sovereign_url
 from .storage import Comment, Issue
 
 
@@ -37,6 +38,8 @@ class IdleLaneScreener:
         self.lane_id = lane_id
         self.subscribed_domains = subscribed_domains
         self.webhook_url = webhook_url
+        if self.webhook_url:
+            validate_sovereign_url(self.webhook_url)
         self.urgent_keywords = urgent_keywords or self.DEFAULT_URGENT_KEYWORDS
         self.webhook_handler = webhook_handler
         self.screened_count = 0
@@ -49,6 +52,9 @@ class IdleLaneScreener:
 
     def emit_thematic_webhook(self, issue: Issue, event_type: str = "urgent_unanswered_question") -> bool:
         """Emit a thematic webhook notification for an urgent unanswered question."""
+        if self.webhook_url:
+            validate_sovereign_url(self.webhook_url)
+
         payload = {
             "event": event_type,
             "lane_id": self.lane_id,

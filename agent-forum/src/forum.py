@@ -43,11 +43,12 @@ class ForumClient:
         backend: Optional[ForgejoBackend] = None,
         linear: Optional[LinearClient] = None,
         storage_path: Optional[str] = None,
+        offline: bool = False,
     ):
         if backend:
             self.backend = backend
         else:
-            self.backend = ForgejoBackend(storage_path=storage_path)
+            self.backend = ForgejoBackend(storage_path=storage_path, offline=offline)
 
         self.storage = self.backend.storage
         self.linear = linear or LinearClient(storage=self.storage)
@@ -109,16 +110,53 @@ class ForumClient:
                 # Persist updated issue state
                 self.storage.save_issue(existing)
 
-                has_answers = len(existing.comments) > 0
+                # Refresh latest comments from backend/storage
+                refreshed = self.backend.get_issue(existing.id) or existing
+                has_answers = len(refreshed.comments) > 0
+
+                # If already answered, return immediately with answer
+                if has_answers:
+                    return AskResult(
+                        issue_id=existing.id,
+                        joined_duplicate=True,
+                        answered=True,
+                        uncertainty_marked=False,
+                        confidence="medium",
+                        body=existing.body,
+                        requires_canonical_verification=existing.requires_canonical_verification,
+                        comments=refreshed.comments,
+                    )
+
+                # If UNANSWERED and timeout requested: apply real execution timeout loop!
+                if timeout_sec is not None and timeout_sec > 0:
+                    deadline = time.time() + timeout_sec
+                    poll_interval = min(0.05, timeout_sec / 10.0)
+                    while time.time() < deadline:
+                        refreshed = self.backend.get_issue(existing.id)
+                        if refreshed and len(refreshed.comments) > 0:
+                            break
+                        time.sleep(poll_interval)
+
+                    answered = bool(refreshed and len(refreshed.comments) > 0)
+                    uncertainty_marked = not answered
+                    confidence = "medium" if answered else "low"
+                    comments = refreshed.comments if refreshed else []
+                else:
+                    # Non-blocking / immediate ask: do not mark uncertainty prematurely
+                    answered = False
+                    uncertainty_marked = False
+                    confidence = "low"
+                    comments = []
+
                 return AskResult(
                     issue_id=existing.id,
                     joined_duplicate=True,
-                    answered=has_answers,
-                    uncertainty_marked=False if has_answers else (bool(timeout_sec and timeout_sec > 0)),
-                    confidence="medium" if has_answers else "low",
+                    answered=answered,
+                    uncertainty_marked=uncertainty_marked,
+                    confidence=confidence,
                     body=existing.body,
                     requires_canonical_verification=existing.requires_canonical_verification,
-                    comments=existing.comments,
+                    comments=comments,
                 )
 
         # 4. Create new issue in sovereign Forgejo
