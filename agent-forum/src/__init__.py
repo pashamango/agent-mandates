@@ -7,6 +7,7 @@ from .forum import (
 )
 from .linear import LinearClient
 from .poller import IdleLaneScreener
+from .governance import CanonChangeError, Constitution, JudgeBoard, RTFMCertifier, ReputationLedger
 from .security import (
     AuthorizationDeniedError,
     RightsChecker,
@@ -36,4 +37,5 @@ __all__ = [
     "Comment",
     "CanonizationTask",
     "IdleLaneScreener",
+    "ReputationLedger", "RTFMCertifier", "Constitution", "CanonChangeError", "JudgeBoard",
 ]

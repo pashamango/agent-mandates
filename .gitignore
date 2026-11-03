@@ -6,3 +6,6 @@ __pycache__/
 .DS_Store
 target/
 **/target/
+# Non-secret auditor canary paths; a match is only an audit signal.
+.agent-forum-canary-MIN237-7f3a/
+.agent-forum-canary-MIN237-b91c/
