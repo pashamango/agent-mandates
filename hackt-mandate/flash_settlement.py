@@ -24,6 +24,8 @@ import uuid
 import hmac
 import hashlib
 import argparse
+import fcntl
+from contextlib import contextmanager
 from typing import Dict, Any, Tuple, Optional
 
 # --- PROTOCOL CONSTANTS ---
@@ -56,6 +58,20 @@ def validate_amount(amount: Any) -> float:
     return val
 
 
+def validate_cap(cap: Any, name: str = "cap") -> float:
+    """
+    Validates that a spending cap is a finite positive number (> 0).
+    Rejects NaN, +/-Infinity, zero, and negative values. Raises ValueError otherwise.
+    """
+    try:
+        val = float(cap)
+    except (TypeError, ValueError):
+        raise ValueError(f"Invalid {name} '{cap}': must be numeric")
+    if not (math.isfinite(val) and val > 0):
+        raise ValueError(f"Invalid {name} {val}: must be a finite positive number (> 0)")
+    return val
+
+
 def compute_hmac(key: str, data: Dict[str, Any]) -> str:
     """Computes HMAC-SHA256 over canonical JSON bytes using the provided key."""
     return hmac.new(key.encode('utf-8'), canonical_bytes(data), hashlib.sha256).hexdigest()
@@ -72,7 +88,7 @@ class BudgetGuard:
     """
     Mandatory Codex Budget Guard:
     Enforces per-task spending caps, weekly rolling expenditure limits,
-    emergency kill-switch, and audit ledger persistence.
+    emergency kill-switch, atomic replay prevention, and audit ledger persistence.
     """
 
     def __init__(
@@ -82,60 +98,146 @@ class BudgetGuard:
         weekly_cap: float = DEFAULT_WEEKLY_CAP,
     ):
         self.ledger_path = ledger_path
-        self.per_task_cap = float(per_task_cap)
-        self.weekly_cap = float(weekly_cap)
+        self.per_task_cap = validate_cap(per_task_cap, "per_task_cap")
+        self.weekly_cap = validate_cap(weekly_cap, "weekly_cap")
         self._ensure_ledger()
 
+    @contextmanager
+    def _lock_ledger(self):
+        lock_path = f"{os.path.abspath(self.ledger_path)}.lock"
+        lock_dir = os.path.dirname(lock_path)
+        if lock_dir and not os.path.exists(lock_dir):
+            os.makedirs(lock_dir, exist_ok=True)
+        lock_fd = open(lock_path, "a+")
+        try:
+            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            try:
+                fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
+            lock_fd.close()
+
     def _ensure_ledger(self) -> None:
-        ledger_dir = os.path.dirname(os.path.abspath(self.ledger_path))
-        if ledger_dir and not os.path.exists(ledger_dir):
-            os.makedirs(ledger_dir, exist_ok=True)
-        if not os.path.exists(self.ledger_path):
-            with open(self.ledger_path, 'w', encoding='utf-8') as f:
-                json.dump({"kill_switch": False, "transactions": []}, f, indent=2)
+        with self._lock_ledger():
+            ledger_dir = os.path.dirname(os.path.abspath(self.ledger_path))
+            if ledger_dir and not os.path.exists(ledger_dir):
+                os.makedirs(ledger_dir, exist_ok=True)
+            if not os.path.exists(self.ledger_path):
+                with open(self.ledger_path, 'w', encoding='utf-8') as f:
+                    json.dump({
+                        "kill_switch": False,
+                        "transactions": [],
+                        "settled_payment_ids": [],
+                        "used_challenge_ids": [],
+                        "used_nonces": [],
+                    }, f, indent=2)
 
     def _load_ledger(self) -> Dict[str, Any]:
         try:
             with open(self.ledger_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                data = json.load(f)
+                if not isinstance(data, dict):
+                    data = {}
+                data.setdefault("kill_switch", False)
+                data.setdefault("transactions", [])
+                data.setdefault("settled_payment_ids", [])
+                data.setdefault("used_challenge_ids", [])
+                data.setdefault("used_nonces", [])
+                return data
         except Exception:
-            return {"kill_switch": False, "transactions": []}
+            return {
+                "kill_switch": False,
+                "transactions": [],
+                "settled_payment_ids": [],
+                "used_challenge_ids": [],
+                "used_nonces": [],
+            }
 
     def _save_ledger(self, data: Dict[str, Any]) -> None:
         with open(self.ledger_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2)
 
+    @staticmethod
+    def _get_settled_indexes(data: Dict[str, Any]) -> Tuple[set, set, set]:
+        settled_pids = set(data.get("settled_payment_ids", []))
+        used_cids = set(data.get("used_challenge_ids", []))
+        used_nonces = set(data.get("used_nonces", []))
+        for tx in data.get("transactions", []):
+            if tx.get("status") == "APPROVED":
+                if tx.get("payment_id"):
+                    settled_pids.add(tx["payment_id"])
+                if tx.get("challenge_id"):
+                    used_cids.add(tx["challenge_id"])
+                if tx.get("nonce"):
+                    used_nonces.add(tx["nonce"])
+        return settled_pids, used_cids, used_nonces
+
+    def is_payment_settled(
+        self,
+        payment_id: str,
+        challenge_id: Optional[str] = None,
+        nonce: Optional[str] = None,
+    ) -> Tuple[bool, Optional[str]]:
+        with self._lock_ledger():
+            data = self._load_ledger()
+            settled_pids, used_cids, used_nonces = self._get_settled_indexes(data)
+            if payment_id and payment_id in settled_pids:
+                return True, "PAYMENT_ALREADY_SETTLED"
+            if challenge_id and challenge_id in used_cids:
+                return True, "NONCE_ALREADY_USED"
+            if nonce and nonce in used_nonces:
+                return True, "NONCE_ALREADY_USED"
+            return False, None
+
     def is_kill_switch_active(self) -> bool:
-        data = self._load_ledger()
-        return bool(data.get("kill_switch", False))
+        with self._lock_ledger():
+            data = self._load_ledger()
+            return bool(data.get("kill_switch", False))
 
     def set_kill_switch(self, state: bool) -> None:
-        data = self._load_ledger()
-        data["kill_switch"] = bool(state)
-        self._save_ledger(data)
+        with self._lock_ledger():
+            data = self._load_ledger()
+            data["kill_switch"] = bool(state)
+            self._save_ledger(data)
 
     def get_weekly_spent(self, current_time: Optional[float] = None) -> float:
         if current_time is None:
             current_time = time.time()
         window_start = current_time - ROLLING_WINDOW_SECONDS
-        data = self._load_ledger()
-        total = 0.0
-        for tx in data.get("transactions", []):
-            if tx.get("status") == "APPROVED":
-                tx_time = tx.get("timestamp", 0)
-                if tx_time >= window_start:
-                    try:
-                        amt = float(tx.get("amount", 0.0))
-                        if math.isfinite(amt) and amt > 0:
-                            total += amt
-                    except (TypeError, ValueError):
-                        pass
-        return total
+        with self._lock_ledger():
+            data = self._load_ledger()
+            total = 0.0
+            for tx in data.get("transactions", []):
+                if tx.get("status") == "APPROVED":
+                    tx_time = tx.get("timestamp", 0)
+                    if tx_time >= window_start:
+                        try:
+                            amt = float(tx.get("amount", 0.0))
+                            if math.isfinite(amt) and amt > 0:
+                                total += amt
+                        except (TypeError, ValueError):
+                            pass
+            return total
 
     def evaluate_request(
         self, amount: float, currency: str, deal_id: str
     ) -> Tuple[bool, str, Dict[str, Any]]:
         """Evaluates whether an outgoing payment passes all budget guards."""
+        try:
+            pt_cap = validate_cap(self.per_task_cap, "per_task_cap")
+            w_cap = validate_cap(self.weekly_cap, "weekly_cap")
+        except ValueError as e:
+            return False, "INVALID_CONFIGURATION", {
+                "allowed": False,
+                "reason": "INVALID_CONFIGURATION",
+                "error": str(e),
+                "amount": amount,
+                "currency": currency,
+                "simulation": True,
+            }
+
         try:
             val = validate_amount(amount)
         except ValueError as e:
@@ -158,24 +260,24 @@ class BudgetGuard:
                 "simulation": True,
             }
 
-        if val > self.per_task_cap:
+        if val > pt_cap:
             return False, "PER_TASK_CAP_EXCEEDED", {
                 "allowed": False,
                 "reason": "PER_TASK_CAP_EXCEEDED",
                 "amount": val,
-                "per_task_cap": self.per_task_cap,
+                "per_task_cap": pt_cap,
                 "currency": currency,
                 "simulation": True,
             }
 
         weekly_spent = self.get_weekly_spent()
-        if weekly_spent + val > self.weekly_cap:
+        if weekly_spent + val > w_cap:
             return False, "WEEKLY_CAP_EXCEEDED", {
                 "allowed": False,
                 "reason": "WEEKLY_CAP_EXCEEDED",
                 "amount": val,
                 "weekly_spent": weekly_spent,
-                "weekly_cap": self.weekly_cap,
+                "weekly_cap": w_cap,
                 "projected_total": weekly_spent + val,
                 "currency": currency,
                 "simulation": True,
@@ -185,13 +287,248 @@ class BudgetGuard:
             "allowed": True,
             "reason": "WITHIN_LIMITS",
             "amount": val,
-            "per_task_cap": self.per_task_cap,
+            "per_task_cap": pt_cap,
             "weekly_spent": weekly_spent,
-            "weekly_cap": self.weekly_cap,
-            "remaining_weekly": self.weekly_cap - (weekly_spent + val),
+            "weekly_cap": w_cap,
+            "remaining_weekly": w_cap - (weekly_spent + val),
             "currency": currency,
             "simulation": True,
         }
+
+    def atomic_settle_transaction(
+        self,
+        deal_id: str,
+        amount: float,
+        currency: str,
+        recipient: str,
+        payment_id: str,
+        challenge_id: str,
+        nonce: str,
+        tx_hash: str,
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Atomically evaluates kill-switch, replay, per-task cap, and weekly cap,
+        and records transaction into ledger under exclusive flock.
+        """
+        try:
+            pt_cap = validate_cap(self.per_task_cap, "per_task_cap")
+            w_cap = validate_cap(self.weekly_cap, "weekly_cap")
+        except ValueError as e:
+            return False, "INVALID_CONFIGURATION", {
+                "allowed": False,
+                "reason": "INVALID_CONFIGURATION",
+                "error": str(e),
+                "simulation": True,
+            }
+
+        try:
+            val = validate_amount(amount)
+        except ValueError as e:
+            return False, "INVALID_AMOUNT", {
+                "allowed": False,
+                "reason": "INVALID_AMOUNT",
+                "error": str(e),
+                "simulation": True,
+            }
+
+        with self._lock_ledger():
+            data = self._load_ledger()
+            now = int(time.time())
+
+            # 1. Kill-switch check
+            if bool(data.get("kill_switch", False)):
+                rej_entry = {
+                    "entry_id": f"ledg-{uuid.uuid4().hex[:12]}",
+                    "timestamp": now,
+                    "deal_id": deal_id,
+                    "amount": val,
+                    "currency": currency,
+                    "recipient": recipient,
+                    "status": "REJECTED_BUDGET_GUARD",
+                    "reason": "KILL_SWITCH_ACTIVE",
+                    "tx_hash": tx_hash or "none",
+                    "payment_id": payment_id,
+                    "challenge_id": challenge_id,
+                    "nonce": nonce,
+                    "simulation": True,
+                }
+                data.setdefault("transactions", []).append(rej_entry)
+                self._save_ledger(data)
+                return False, "KILL_SWITCH_ACTIVE", {
+                    "allowed": False,
+                    "reason": "KILL_SWITCH_ACTIVE",
+                    "kill_switch": True,
+                    "amount": val,
+                    "currency": currency,
+                    "simulation": True,
+                }
+
+            # 2. Replay check (G1/G3)
+            settled_pids, used_cids, used_nonces = self._get_settled_indexes(data)
+            if payment_id and payment_id in settled_pids:
+                rej_entry = {
+                    "entry_id": f"ledg-{uuid.uuid4().hex[:12]}",
+                    "timestamp": now,
+                    "deal_id": deal_id,
+                    "amount": val,
+                    "currency": currency,
+                    "recipient": recipient,
+                    "status": "REJECTED_REPLAY",
+                    "reason": "PAYMENT_ALREADY_SETTLED",
+                    "tx_hash": tx_hash or "none",
+                    "payment_id": payment_id,
+                    "challenge_id": challenge_id,
+                    "nonce": nonce,
+                    "simulation": True,
+                }
+                data.setdefault("transactions", []).append(rej_entry)
+                self._save_ledger(data)
+                return False, "PAYMENT_ALREADY_SETTLED", {
+                    "allowed": False,
+                    "reason": "PAYMENT_ALREADY_SETTLED",
+                    "error": f"Payment {payment_id} has already been settled",
+                    "payment_id": payment_id,
+                    "challenge_id": challenge_id,
+                    "nonce": nonce,
+                    "simulation": True,
+                }
+
+            if (challenge_id and challenge_id in used_cids) or (nonce and nonce in used_nonces):
+                rej_entry = {
+                    "entry_id": f"ledg-{uuid.uuid4().hex[:12]}",
+                    "timestamp": now,
+                    "deal_id": deal_id,
+                    "amount": val,
+                    "currency": currency,
+                    "recipient": recipient,
+                    "status": "REJECTED_REPLAY",
+                    "reason": "NONCE_ALREADY_USED",
+                    "tx_hash": tx_hash or "none",
+                    "payment_id": payment_id,
+                    "challenge_id": challenge_id,
+                    "nonce": nonce,
+                    "simulation": True,
+                }
+                data.setdefault("transactions", []).append(rej_entry)
+                self._save_ledger(data)
+                return False, "NONCE_ALREADY_USED", {
+                    "allowed": False,
+                    "reason": "NONCE_ALREADY_USED",
+                    "error": f"Challenge/nonce ({challenge_id}/{nonce}) has already been used",
+                    "payment_id": payment_id,
+                    "challenge_id": challenge_id,
+                    "nonce": nonce,
+                    "simulation": True,
+                }
+
+            # 3. Per-task cap check
+            if val > pt_cap:
+                rej_entry = {
+                    "entry_id": f"ledg-{uuid.uuid4().hex[:12]}",
+                    "timestamp": now,
+                    "deal_id": deal_id,
+                    "amount": val,
+                    "currency": currency,
+                    "recipient": recipient,
+                    "status": "REJECTED_BUDGET_GUARD",
+                    "reason": "PER_TASK_CAP_EXCEEDED",
+                    "tx_hash": tx_hash or "none",
+                    "payment_id": payment_id,
+                    "challenge_id": challenge_id,
+                    "nonce": nonce,
+                    "simulation": True,
+                }
+                data.setdefault("transactions", []).append(rej_entry)
+                self._save_ledger(data)
+                return False, "PER_TASK_CAP_EXCEEDED", {
+                    "allowed": False,
+                    "reason": "PER_TASK_CAP_EXCEEDED",
+                    "amount": val,
+                    "per_task_cap": pt_cap,
+                    "currency": currency,
+                    "simulation": True,
+                }
+
+            # 4. Weekly rolling cap check
+            window_start = now - ROLLING_WINDOW_SECONDS
+            weekly_spent = 0.0
+            for tx in data.get("transactions", []):
+                if tx.get("status") == "APPROVED":
+                    tx_time = tx.get("timestamp", 0)
+                    if tx_time >= window_start:
+                        try:
+                            amt = float(tx.get("amount", 0.0))
+                            if math.isfinite(amt) and amt > 0:
+                                weekly_spent += amt
+                        except (TypeError, ValueError):
+                            pass
+
+            if weekly_spent + val > w_cap:
+                rej_entry = {
+                    "entry_id": f"ledg-{uuid.uuid4().hex[:12]}",
+                    "timestamp": now,
+                    "deal_id": deal_id,
+                    "amount": val,
+                    "currency": currency,
+                    "recipient": recipient,
+                    "status": "REJECTED_BUDGET_GUARD",
+                    "reason": "WEEKLY_CAP_EXCEEDED",
+                    "tx_hash": tx_hash or "none",
+                    "payment_id": payment_id,
+                    "challenge_id": challenge_id,
+                    "nonce": nonce,
+                    "simulation": True,
+                }
+                data.setdefault("transactions", []).append(rej_entry)
+                self._save_ledger(data)
+                return False, "WEEKLY_CAP_EXCEEDED", {
+                    "allowed": False,
+                    "reason": "WEEKLY_CAP_EXCEEDED",
+                    "amount": val,
+                    "weekly_spent": weekly_spent,
+                    "weekly_cap": w_cap,
+                    "projected_total": weekly_spent + val,
+                    "currency": currency,
+                    "simulation": True,
+                }
+
+            # 5. Approved transaction
+            approved_entry = {
+                "entry_id": f"ledg-{uuid.uuid4().hex[:12]}",
+                "timestamp": now,
+                "deal_id": deal_id,
+                "amount": val,
+                "currency": currency,
+                "recipient": recipient,
+                "status": "APPROVED",
+                "reason": "SETTLEMENT_SUCCESSFUL",
+                "tx_hash": tx_hash or "none",
+                "payment_id": payment_id,
+                "challenge_id": challenge_id,
+                "nonce": nonce,
+                "simulation": True,
+            }
+            data.setdefault("transactions", []).append(approved_entry)
+            if payment_id:
+                data.setdefault("settled_payment_ids", []).append(payment_id)
+            if challenge_id:
+                data.setdefault("used_challenge_ids", []).append(challenge_id)
+            if nonce:
+                data.setdefault("used_nonces", []).append(nonce)
+            self._save_ledger(data)
+
+            return True, "APPROVED", {
+                "allowed": True,
+                "reason": "SETTLEMENT_SUCCESSFUL",
+                "amount": val,
+                "per_task_cap": pt_cap,
+                "weekly_spent": weekly_spent + val,
+                "weekly_cap": w_cap,
+                "remaining_weekly": w_cap - (weekly_spent + val),
+                "currency": currency,
+                "settled_at": now,
+                "simulation": True,
+            }
 
     def record_entry(
         self,
@@ -202,50 +539,74 @@ class BudgetGuard:
         status: str,
         reason: str,
         tx_hash: Optional[str] = None,
+        payment_id: Optional[str] = None,
+        challenge_id: Optional[str] = None,
+        nonce: Optional[str] = None,
     ) -> Dict[str, Any]:
-        data = self._load_ledger()
-        if status == "APPROVED":
-            val = validate_amount(amount)
-        else:
-            try:
-                val = float(amount)
-                if not math.isfinite(val):
+        with self._lock_ledger():
+            data = self._load_ledger()
+            if status == "APPROVED":
+                val = validate_amount(amount)
+            else:
+                try:
+                    val = float(amount)
+                    if not math.isfinite(val):
+                        val = 0.0
+                except (TypeError, ValueError):
                     val = 0.0
-            except (TypeError, ValueError):
-                val = 0.0
 
-        entry = {
-            "entry_id": f"ledg-{uuid.uuid4().hex[:12]}",
-            "timestamp": int(time.time()),
-            "deal_id": deal_id,
-            "amount": val,
-            "currency": currency,
-            "recipient": recipient,
-            "status": status,
-            "reason": reason,
-            "tx_hash": tx_hash or "none",
-            "simulation": True,
-        }
-        data.setdefault("transactions", []).append(entry)
-        self._save_ledger(data)
-        return entry
+            entry = {
+                "entry_id": f"ledg-{uuid.uuid4().hex[:12]}",
+                "timestamp": int(time.time()),
+                "deal_id": deal_id,
+                "amount": val,
+                "currency": currency,
+                "recipient": recipient,
+                "status": status,
+                "reason": reason,
+                "tx_hash": tx_hash or "none",
+                "payment_id": payment_id,
+                "challenge_id": challenge_id,
+                "nonce": nonce,
+                "simulation": True,
+            }
+            data.setdefault("transactions", []).append(entry)
+            if status == "APPROVED":
+                if payment_id:
+                    data.setdefault("settled_payment_ids", []).append(payment_id)
+                if challenge_id:
+                    data.setdefault("used_challenge_ids", []).append(challenge_id)
+                if nonce:
+                    data.setdefault("used_nonces", []).append(nonce)
+            self._save_ledger(data)
+            return entry
 
     def summary(self) -> Dict[str, Any]:
-        data = self._load_ledger()
-        txs = data.get("transactions", [])
-        approved = [t for t in txs if t.get("status") == "APPROVED"]
-        rejected = [t for t in txs if t.get("status") == "REJECTED_BUDGET_GUARD"]
-        return {
-            "simulation": True,
-            "kill_switch_active": self.is_kill_switch_active(),
-            "per_task_cap": self.per_task_cap,
-            "weekly_cap": self.weekly_cap,
-            "weekly_spent": self.get_weekly_spent(),
-            "total_transactions": len(txs),
-            "approved_count": len(approved),
-            "rejected_count": len(rejected),
-            "total_settled_amount": sum(float(t.get("amount", 0.0)) for t in approved),
-        }
+        with self._lock_ledger():
+            data = self._load_ledger()
+            txs = data.get("transactions", [])
+            approved = [t for t in txs if t.get("status") == "APPROVED"]
+            rejected = [t for t in txs if t.get("status") == "REJECTED_BUDGET_GUARD"]
+            now = time.time()
+            window_start = now - ROLLING_WINDOW_SECONDS
+            weekly_spent = sum(
+                float(t.get("amount", 0.0))
+                for t in approved
+                if t.get("timestamp", 0) >= window_start
+                and math.isfinite(float(t.get("amount", 0.0)))
+                and float(t.get("amount", 0.0)) > 0
+            )
+            return {
+                "simulation": True,
+                "kill_switch_active": bool(data.get("kill_switch", False)),
+                "per_task_cap": self.per_task_cap,
+                "weekly_cap": self.weekly_cap,
+                "weekly_spent": weekly_spent,
+                "total_transactions": len(txs),
+                "approved_count": len(approved),
+                "rejected_count": len(rejected),
+                "total_settled_amount": sum(float(t.get("amount", 0.0)) for t in approved),
+            }
 
 
 # --- X402 CHALLENGE & PAYMENT ---
