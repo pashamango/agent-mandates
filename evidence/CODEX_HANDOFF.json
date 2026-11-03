@@ -1,0 +1,36 @@
+{
+  "ticket": "MIN-147",
+  "run_id": "run-6a0448d04525",
+  "builder": "codex@wolfram",
+  "handoff": "HANDOFF_FOR_QA",
+  "status": "READY_FOR_INDEPENDENT_QA",
+  "simulation": true,
+  "crypto_scheme": "TESTNET_SIMULATED_HMAC_SHA256",
+  "repo_url": "https://github.com/pashamango/agent-mandates.git",
+  "repo_mirror": "https://github.com/pashamango/hackt-com.git",
+  "branch": "minutta/min-147-min-116-build-flash-settlement-x402-micropayment-badge",
+  "artifact_paths": [
+    "hackt-mandate/flash_settlement.py",
+    "hackt-mandate/test_flash.sh",
+    "hackt-mandate/test_regression.py",
+    "evidence/EVIDENCE.json",
+    "evidence/G1_X402_FLOW.json",
+    "evidence/G2_BADGE_VERIFICATION.json",
+    "evidence/G3_BUDGET_GUARD.json",
+    "evidence/test_run.log",
+    "evidence/MANIFEST.sha256"
+  ],
+  "verification_cmd": "git clone https://github.com/pashamango/agent-mandates.git && git checkout minutta/min-147-min-116-build-flash-settlement-x402-micropayment-badge && bash hackt-mandate/test_flash.sh",
+  "checks": {
+    "g1_x402_flow": "PASS",
+    "g2_badge_verification": "PASS",
+    "g3_budget_guard": "PASS",
+    "g4_evidence_bundle": "PASS",
+    "acceptance_tests": "16/16 PASS",
+    "regression_tests": "20/20 PASS"
+  },
+  "limitations": [
+    "Testnet simulation only; no real money, blockchain, or wallet private keys.",
+    "HMAC-SHA256 simulation is explicitly not a production asymmetric wallet signature."
+  ]
+}
